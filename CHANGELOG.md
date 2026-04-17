@@ -2,7 +2,12 @@
 
 All changes we make to the assignment code or PDF will be documented in this file.
 
-## [26.0.0] - 2025-04-15
+## [26.1.0] - 2026-04-16
+- handout: clean up language, fix a few inconsistencies
+- handout: fix triton code compile issue
+- handout: reduce work for profiling bits
+
+## [26.0.0] - 2026-04-15
 - handout: more detailed Nsight Systems profiler
 - handout: replace leaderboard task with full forward and backward pass on two B200s
 - handout: add section on activation checkpointing

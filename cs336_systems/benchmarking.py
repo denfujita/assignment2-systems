@@ -34,85 +34,80 @@ def build_image(*, include_tests: bool = False) -> modal.Image:
 image = build_image()
 
 @app.function(image=image, gpu="B200")
-def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mode: str): 
+def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mode: str):
     """
-    A script that will initialize a basics Transformer model with the given
-    hyperparameters, create a random batch of data, and time forward-only, forward-and-
-    backward, and full training steps that include the optimizer step
+    Initialize a BasicsTransformerLM, create random data, and benchmark:
+    - forward
+    - forward + backward
+    - forward + backward + optimizer
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # initialize model
     torch.manual_seed(0)
-    model = BasicsTransformerLM(hyperparams["vocab_size"], 
-                                hyperparams["context_length"], 
-                                hyperparams["d_model"],
-                                hyperparams["num_layers"],
-                                hyperparams["num_heads"],
-                                hyperparams["d_ff"],
-                                hyperparams["rope_theta"])
-    model = model.to(device)
 
-    # generate random batch of data
-    data = torch.randint(0, hyperparams["vocab_size"], (BATCH_SIZE, hyperparams["context_length"]), device=device)
-    targets = torch.randint(0, hyperparams["vocab_size"], (BATCH_SIZE, hyperparams["context_length"]), device=device)
+    # initialize LM
+    model = BasicsTransformerLM(
+        hyperparams["vocab_size"],
+        hyperparams["context_length"],
+        hyperparams["d_model"],
+        hyperparams["num_layers"],
+        hyperparams["num_heads"],
+        hyperparams["d_ff"],
+        hyperparams["rope_theta"],
+    ).to(device)
 
-    times = [] 
-    if mode == "forward":
-        with torch.no_grad():
-            for i in range(num_warmups):
-                model(data)
-            torch.cuda.synchronize()
-            for i in range(num_steps):
-                start = timeit.default_timer()
-                model(data)
-                torch.cuda.synchronize()
-                end = timeit.default_timer()
-                times.append(end - start)
-            times = np.array(times)
-            return np.mean(times), np.std(times)
-    elif mode == "forward-back":
-        for i in range(num_warmups):
-            output = model(data)
-            loss = cross_entropy(output, targets)
-            loss.backward()
-            model.zero_grad(set_to_none=True)
-        torch.cuda.synchronize()
-        for i in range(num_steps):
-            start = timeit.default_timer()
-            output = model(data)
-            loss = cross_entropy(output, targets)
-            loss.backward()
-            torch.cuda.synchronize()
-            end = timeit.default_timer()
-            times.append(end - start)
-            model.zero_grad(set_to_none=True)
-        times = np.array(times)
-        return np.mean(times), np.std(times)
-    else: # forward backward and optimizer 
-        optimizer = AdamW(model.parameters())
-        for i in range(num_warmups):
-            output = model(data)
-            loss = cross_entropy(output, targets)
-            
+    # initialize train and target data
+    data = torch.randint(
+        0,
+        hyperparams["vocab_size"],
+        (BATCH_SIZE, hyperparams["context_length"]),
+        device=device,
+    )
+    targets = torch.randint(
+        0,
+        hyperparams["vocab_size"],
+        (BATCH_SIZE, hyperparams["context_length"]),
+        device=device,
+    )
+
+    optimizer = AdamW(model.parameters()) if mode == "forward-back-optimizer" else None
+
+    def run_step():
+        if mode == "forward":
+            with torch.no_grad():
+                return model(data)
+
+        output = model(data)
+        loss = cross_entropy(output, targets)
+
+        if optimizer is not None:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-        
-        torch.cuda.synchronize()
-        for i in range(num_steps):
-            start = timeit.default_timer()
-            output = model(data)
-            loss = cross_entropy(output, targets)
-
-            optimizer.zero_grad(set_to_none=True)
+        else:
             loss.backward()
-            optimizer.step()
-            torch.cuda.synchronize()
-            end = timeit.default_timer()
-            times.append(end - start)
-        times = np.array(times)
-        return np.mean(times), np.std(times)
+            model.zero_grad(set_to_none=True)
+
+        return loss
+
+    # warm up
+    for _ in range(num_warmups):
+        run_step()
+
+    torch.cuda.synchronize()
+
+    # measure
+    times = []
+    for _ in range(num_steps):
+        start = timeit.default_timer()
+        run_step()
+        torch.cuda.synchronize()
+        end = timeit.default_timer()
+
+        times.append(end - start)
+
+    times = np.array(times)
+    return np.mean(times), np.std(times)
 
 
 def generate_latex_table(setup, result) -> str:

@@ -1,5 +1,6 @@
 \documentclass[11pt]{article}
 
+
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath, amssymb, amsthm}
 \usepackage{graphicx}
@@ -10,6 +11,7 @@
 \usepackage{hyperref}
 \usepackage{enumitem}
 \usepackage{parskip}
+\usepackage{float}
 
 \hypersetup{
   colorlinks=true,
@@ -63,18 +65,93 @@
 \subq{a} Write a script to perform basic end-to-end benchmarking of the forward pass, backward pass, and optimizer step in your model (given hyperparameters, random batch, warm-up steps, timed steps for forward / forward+backward / full training step, with \texttt{torch.cuda.synchronize()} after each step).
 \deliverable{A script that initializes a basics Transformer with given hyperparameters, creates a random batch, and times forward-only, forward-and-backward, and full training steps.}
 \begin{answer}
-% Point to / describe your script (e.g., cs336_systems/benchmarking.py) here.
+See $cs336\_systems/benchmarking.py$
 \end{answer}
 
+\newpage
 \subq{b} Time the forward, backward, and optimizer step for each model size in Table~1 using 5 warmup steps and 10 measurement steps. How long does a forward pass take? A backward pass? Is variability / std small?
 \deliverable{A 1--2 sentence response with your timings.}
 \begin{answer}
-% Your timings table + 1-2 sentence summary.
+  \begin{table}[H]
+    \centering
+    \caption{Benchmark results across model sizes (5 warm up steps, 10 training steps).}
+    \label{tab:model-benchmark-results}
+    \begin{tabular}{llll}
+    \toprule
+    Size & forward & forward-back & forward-back-optimizer \\
+    \midrule
+    small & 0.0165 ± 0.0000 & 0.0488 ± 0.0000 & 0.0561 ± 0.0000 \\
+    med & 0.0472 ± 0.0001 & 0.1398 ± 0.0007 & 0.1566 ± 0.0011 \\
+    large & 0.1063 ± 0.0000 & 0.3168 ± 0.0069 & 0.3447 ± 0.0009 \\
+    xl & 0.2935 ± 0.0004 & 0.8636 ± 0.0005 & 0.9453 ± 0.0001 \\
+    10b & 0.9448 ± 0.0002 & 2.8113 ± 0.0006 & OOM \\
+    \bottomrule
+    \end{tabular}
+    \end{table}    
+    See table for timing of forward, forward-backward, and forward-backward-optimizer steps. 
+    Notably, forward-backward (and with optimizer) steps take a lot longer than just forward steps, which makes
+    sense because of the gradient computation overhead and other tracking measurements that forward doesn't have to deal with.
+    The variability across runs is extremely small and the run times are very consistent, as seen by the small standard deviations.
 \end{answer}
 
 \subq{c} Repeat the analysis without warmup, and with 1 or 2 warmup steps. How do results change? Why?
 \deliverable{A 2--3 sentence response.}
 \begin{answer}
+  \begin{table}[H]
+    \centering
+    \caption{Benchmark results across model sizes (no warm up steps, 10 training steps).}
+    \label{tab:model-benchmark-results-no-warmup}
+    \begin{tabular}{llll}
+    \toprule
+    Size & forward & forward-back & forward-back-optimizer \\
+    \midrule
+    small & 0.0555 ± 0.1168 & 0.1181 ± 0.2001 & 0.1161 ± 0.1653 \\
+    med & 0.0817 ± 0.1043 & 0.2044 ± 0.1923 & 0.2330 ± 0.2127 \\
+    large & 0.1070 ± 0.0024 & 0.3605 ± 0.1424 & 0.3610 ± 0.0468 \\
+    xl & 0.3300 ± 0.1033 & 0.8694 ± 0.0265 & 1.0079 ± 0.1902 \\
+    10b & 0.9624 ± 0.0501 & 2.8153 ± 0.0015 & OOM \\
+    \bottomrule
+    \end{tabular}
+    \end{table}    
+
+    As seen above in the table, without warming up the GPU beforehand, each of the computations take significantly longer (since now there is the overhead for warming up the GPU--compiling the kernels, allocating memory, etc...)
+
+  \begin{table}[H]
+    \centering
+    \caption{Benchmark results across model sizes (one warm up step and 10 training steps).}
+    \label{tab:model-benchmark-results-one-warmup-step}
+    \begin{tabular}{llll}
+    \toprule
+    Size & forward & forward-back & forward-back-optimizer \\
+    \midrule
+    small & 0.0164 ± 0.0000 & 0.0483 ± 0.0002 & 0.0634 ± 0.0187 \\
+    med & 0.0469 ± 0.0001 & 0.1390 ± 0.0000 & 0.1586 ± 0.0032 \\
+    large & 0.1062 ± 0.0001 & 0.3135 ± 0.0001 & 0.3496 ± 0.0222 \\
+    xl & 0.2927 ± 0.0003 & 0.8640 ± 0.0005 & 0.9422 ± 0.0004 \\
+    10b & 0.9451 ± 0.0008 & 2.8198 ± 0.0001 & OOM \\
+    \bottomrule
+    \end{tabular}
+    \end{table}
+      
+
+  \begin{table}[H]
+    \centering
+    \caption{Benchmark results across model sizes (2 warm up steps and 10 training steps).}
+    \label{tab:model-benchmark-results-two-warmups}
+    \begin{tabular}{llll}
+    \toprule
+    Size & forward & forward-back & forward-back-optimizer \\
+    \midrule
+    small & 0.0165 ± 0.0000 & 0.0489 ± 0.0000 & 0.0569 ± 0.0006 \\
+    med & 0.0471 ± 0.0000 & 0.1396 ± 0.0001 & 0.1573 ± 0.0003 \\
+    large & 0.1064 ± 0.0005 & 0.3185 ± 0.0105 & 0.3443 ± 0.0007 \\
+    xl & 0.2927 ± 0.0003 & 0.8641 ± 0.0006 & 0.9453 ± 0.0009 \\
+    10b & 0.9452 ± 0.0003 & 2.8204 ± 0.0010 & OOM \\
+    \bottomrule
+    \end{tabular}
+    \end{table}      
+
+    As seen in the above table comapred to the one without warm up steps, just warming up the GPU for one iteration greatly reduces the total training time. The result between 1 or 2 warm up steps is much closer to the 10 warm up steps one since most of the overhead (e.g. loading the different weights, tensors, etc...) is eliminated if we just do one warm up step ahead of timing the GPU. The difference was also quite dramatic, showing that the majority of the time went into initializing the GPU and not running the forward and backward steps.
 \end{answer}
 
 

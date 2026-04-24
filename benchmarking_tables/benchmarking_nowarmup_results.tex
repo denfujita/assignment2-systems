@@ -1,0 +1,15 @@
+\begin{table}
+\caption{Benchmark results across model sizes.}
+\label{tab:model-benchmark-results}
+\begin{tabular}{llll}
+\toprule
+Size & forward & forward-back & forward-back-optimizer \\
+\midrule
+small & 0.0555 ± 0.1168 & 0.1181 ± 0.2001 & 0.1161 ± 0.1653 \\
+med & 0.0817 ± 0.1043 & 0.2044 ± 0.1923 & 0.2330 ± 0.2127 \\
+large & 0.1070 ± 0.0024 & 0.3605 ± 0.1424 & 0.3610 ± 0.0468 \\
+xl & 0.3300 ± 0.1033 & 0.8694 ± 0.0265 & 1.0079 ± 0.1902 \\
+10b & 0.9624 ± 0.0501 & 2.8153 ± 0.0015 & OOM \\
+\bottomrule
+\end{tabular}
+\end{table}

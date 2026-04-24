@@ -7,11 +7,69 @@ from cs336_basics.optimizer import AdamW
 import torch
 import numpy as np
 import modal
-
+import subprocess
+import argparse
+import torch.cuda.nvtx as nvtx
+import os
 
 BATCH_SIZE = 4
 
+VOCAB_SIZE = 10_000
+CONTEXT_LENGTH = 512
+ROPE_THETA = 10_000.0
+
+small_hyperparam = {
+    "vocab_size": VOCAB_SIZE,
+    "context_length": CONTEXT_LENGTH,
+    "d_model": 768,
+    "num_layers": 12,
+    "num_heads": 12,
+    "d_ff": 3072,
+    "rope_theta": ROPE_THETA,
+}
+
+medium_hyperparam = {
+    "vocab_size": VOCAB_SIZE,
+    "context_length": CONTEXT_LENGTH,
+    "d_model": 1024,
+    "num_layers": 24,
+    "num_heads": 16,
+    "d_ff": 4096,
+    "rope_theta": ROPE_THETA,
+}
+
+large_hyperparam = {
+    "vocab_size": VOCAB_SIZE,
+    "context_length": CONTEXT_LENGTH,
+    "d_model": 1280,
+    "num_layers": 36,
+    "num_heads": 20,
+    "d_ff": 5120,
+    "rope_theta": ROPE_THETA,
+}
+
+xl_hyperparam = {
+    "vocab_size": VOCAB_SIZE,
+    "context_length": CONTEXT_LENGTH,
+    "d_model": 2560,
+    "num_layers": 32,
+    "num_heads": 32,
+    "d_ff": 10240,
+    "rope_theta": ROPE_THETA,
+}
+
+ten_b_hyperparam = {
+    "vocab_size": VOCAB_SIZE,
+    "context_length": CONTEXT_LENGTH,
+    "d_model": 4608,
+    "num_layers": 50,
+    "num_heads": 36,
+    "d_ff": 12288,
+    "rope_theta": ROPE_THETA,
+}
+
 app = modal.App(name="gpu-benchmarking")
+vol = modal.Volume.from_name("nsight-profiles", create_if_missing=True)
 
 def build_image(*, include_tests: bool = False) -> modal.Image:
     image = (
@@ -110,7 +168,7 @@ def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mod
     return np.mean(times), np.std(times)
 
 
-def generate_latex_table(setup, result) -> str:
+def generate_latex_table(setup, result) -> None:
     import pandas as pd
 
     formatted_result = []
@@ -143,71 +201,73 @@ def generate_latex_table(setup, result) -> str:
 
     Path("benchmarking_one_warmups_results.tex").write_text(latex)
 
+@app.function(
+    image=image,
+    gpu="B200",
+    volumes={"/profiles": vol},
+    timeout=60 * 30,
+)
+def profile_on_modal(mode: str = "forward"):
+    out = f"/profiles/benchmark_{mode}"
+
+    cmd = [
+        "nsys", "profile",
+        "--trace=cuda,nvtx,cublas,cudnn,osrt",
+        "--stats=true",
+        "--force-overwrite=true",
+        "-o", out,
+        "python", __file__,
+        "--worker",
+        "--mode", mode,
+        "--num-warmups", "5",
+        "--num-steps", "1",
+    ]
+
+    env = os.environ.copy()
+    env["PYTORCH_ALLOC_CONF"] = "backend:cudaMallocAsync"
+    env["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
+
+    subprocess.run(cmd, env=env, check=True)
+
+    subprocess.run(cmd, check=True)
+    vol.commit()
+    return f"{out}.nsys-rep"
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--worker", action="store_true")
+    parser.add_argument("--mode", choices=["forward", "forward-back", "forward-back-optimizer"])
+    parser.add_argument("--num-warmups", type=int, default=5)
+    parser.add_argument("--num-steps", type=int, default=1)
+    args = parser.parse_args()
+
+    if args.worker:
+        hyperparams = small_hyperparam
+
+        mean, std = benchmarking_script.local(
+            args.num_warmups,
+            args.num_steps,
+            hyperparams,
+            args.mode,
+        )
+
+        print(f"{args.mode}: {mean:.4f} ± {std:.4f}")
+
 @app.local_entrypoint()
 def modal_main() -> None:
+    report_path = profile_on_modal.remote("forward")
+    print(report_path)
 
-    VOCAB_SIZE = 10_000
-    CONTEXT_LENGTH = 512
-    ROPE_THETA = 10_000.0
+    # used in benchmarking question
 
-    small_hyperparam = {
-        "vocab_size": VOCAB_SIZE,
-        "context_length": CONTEXT_LENGTH,
-        "d_model": 768,
-        "num_layers": 12,
-        "num_heads": 12,
-        "d_ff": 3072,
-        "rope_theta": ROPE_THETA,
-    }
-
-    medium_hyperparam = {
-        "vocab_size": VOCAB_SIZE,
-        "context_length": CONTEXT_LENGTH,
-        "d_model": 1024,
-        "num_layers": 24,
-        "num_heads": 16,
-        "d_ff": 4096,
-        "rope_theta": ROPE_THETA,
-    }
-
-    large_hyperparam = {
-        "vocab_size": VOCAB_SIZE,
-        "context_length": CONTEXT_LENGTH,
-        "d_model": 1280,
-        "num_layers": 36,
-        "num_heads": 20,
-        "d_ff": 5120,
-        "rope_theta": ROPE_THETA,
-    }
-
-    xl_hyperparam = {
-        "vocab_size": VOCAB_SIZE,
-        "context_length": CONTEXT_LENGTH,
-        "d_model": 2560,
-        "num_layers": 32,
-        "num_heads": 32,
-        "d_ff": 10240,
-        "rope_theta": ROPE_THETA,
-    }
-
-    ten_b_hyperparam = {
-        "vocab_size": VOCAB_SIZE,
-        "context_length": CONTEXT_LENGTH,
-        "d_model": 4608,
-        "num_layers": 50,
-        "num_heads": 36,
-        "d_ff": 12288,
-        "rope_theta": ROPE_THETA,
-    }
-
-    eval_params = []
-    setup = []
+    # eval_params = []
+    # setup = []
     
-    for model_type, hyperparam in [("small", small_hyperparam), ("med", medium_hyperparam), ("large", large_hyperparam), ("xl", xl_hyperparam), ("10b", ten_b_hyperparam)]:
-        for mode in ["forward", "forward-back", "forward-back-optimizer"]:
-            eval_params.append((1, 10, hyperparam, mode))
-            setup.append((model_type, mode))
+    # # for model_type, hyperparam in [("small", small_hyperparam), ("med", medium_hyperparam), ("large", large_hyperparam), ("xl", xl_hyperparam), ("10b", ten_b_hyperparam)]:
+    # #     for mode in ["forward", "forward-back", "forward-back-optimizer"]:
+    # #         eval_params.append((1, 10, hyperparam, mode))
+    # #         setup.append((model_type, mode))
 
-    result = list(benchmarking_script.starmap(eval_params, return_exceptions=True))
-    latex = generate_latex_table(setup, result)
-    return latex
+    # # result = list(benchmarking_script.starmap(eval_params, return_exceptions=True))
+    # # latex = generate_latex_table(setup, result)
+    # # return latex

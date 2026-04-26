@@ -1,6 +1,6 @@
 \documentclass[11pt]{article}
 
-
+\usepackage{tabularx}
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath, amssymb, amsthm}
 \usepackage{graphicx}
@@ -10,6 +10,7 @@
 \usepackage{xcolor}
 \usepackage{hyperref}
 \usepackage{enumitem}
+\usepackage{seqsplit}
 \usepackage{parskip}
 \usepackage{float}
 
@@ -47,7 +48,7 @@
 \graphicspath{{figures/}}
 
 \title{CS336 Assignment 2: Systems --- Writeup}
-\author{James}
+\author{James Liu}
 \date{\today}
 
 \begin{document}
@@ -87,11 +88,13 @@ See $cs336\_systems/benchmarking.py$
     10b & 0.9448 ± 0.0002 & 2.8113 ± 0.0006 & OOM \\
     \bottomrule
     \end{tabular}
-    \end{table}    
+    \end{table}  
     See table for timing of forward, forward-backward, and forward-backward-optimizer steps. 
-    Notably, forward-backward (and with optimizer) steps take a lot longer than just forward steps, which makes
-    sense because of the gradient computation overhead and other tracking measurements that forward doesn't have to deal with.
-    The variability across runs is extremely small and the run times are very consistent, as seen by the small standard deviations.
+    The forward-only, forward+backward, and full training-step timings are shown in 
+    Table~\ref{tab:model-benchmark-results}. Forward+backward is roughly 3x 
+    slower than forward-only due to gradient computation, and adding the optimizer 
+    step introduces a smaller additional cost. The standard deviations are extremely 
+    small after warmup, which shows that the GPU runs are extremely consistent. 
 \end{answer}
 
 \subq{c} Repeat the analysis without warmup, and with 1 or 2 warmup steps. How do results change? Why?
@@ -151,7 +154,7 @@ See $cs336\_systems/benchmarking.py$
     \end{tabular}
     \end{table}      
 
-    As seen in the above table comapred to the one without warm up steps, just warming up the GPU for one iteration greatly reduces the total training time. The result between 1 or 2 warm up steps is much closer to the 10 warm up steps one since most of the overhead (e.g. loading the different weights, tensors, etc...) is eliminated if we just do one warm up step ahead of timing the GPU. The difference was also quite dramatic, showing that the majority of the time went into initializing the GPU and not running the forward and backward steps.
+    As seen in the above table comapred to the one without warm up steps, just warming up the GPU for one iteration greatly reduces the total training time. The result between 1 or 2 warm up steps is much closer to the 10 warm up steps one since most of the overhead (e.g. CUDA context initialization, allocator warm up, etc...) is eliminated if we just do one warm up step ahead of timing the GPU. The difference was also quite dramatic, showing that the majority of the time went into initializing the GPU and not running the forward and backward steps.
 \end{answer}
 
 
@@ -159,29 +162,59 @@ See $cs336\_systems/benchmarking.py$
 
 Profile the forward pass, backward pass, and optimizer step with \texttt{nsys} for two model sizes and three power-of-two context lengths larger than 128.
 
+\begin{table}[h]
+  \centering
+  \begin{tabular}{c|cc}
+  \toprule
+  \textbf{Context Length} & \multicolumn{2}{c}{\textbf{Model Size}} \\
+   & Small (ms) & XL (ms) \\
+  \midrule
+  256  & 17.794 & 77.585 \\
+  512  & 30.700 & 112.659 \\
+  1024 & 37.988 & 221.650 \\
+  \bottomrule
+  \end{tabular}
+  \caption{Forward pass latency (ms) across model sizes and context lengths.}
+  \label{tab:latency}
+  \end{table}
+
 \subq{a} Total forward-pass time in Nsight vs.\ the Python standard library time.
 \deliverable{A 1--2 sentence response.}
 \begin{answer}
+  The Python standard-library timings closely matched the Nsight forward-pass timings 
+  after converting units. For the small model, Python measured 18.6 ms, 31.8 ms, and 
+  39.5 ms at context lengths 256, 512, and 1024, compared with Nsight's 17.8 ms, 30.7 ms, 
+  and 38.0 ms. For the XL model, Python measured 80.4 ms, 116.9 ms, and 229.7 ms, compared 
+  with Nsight's 77.6 ms, 112.7 ms, and 221.7 ms.
 \end{answer}
 
 \subq{b} Which CUDA kernel has the largest cumulative GPU time in the forward pass? How many times is it invoked in one forward pass? Is it still the top kernel for forward+backward?
 \deliverable{A 1--2 sentence response.}
 \begin{answer}
+The dominant forward-pass CUDA kernel was a CUTLASS SGEMM matrix multiplication.
+For the XL model at context length $1024$, the top kernel used a $128\times64\times16$ SGEMM tile, took $42.1\%$ of GPU kernel time, and ran about $160$ times per forward pass.
+In forward+backward, the dominant kernel was still SGEMM, but it switched to backward-shaped transpose variants.
 \end{answer}
 
 \subq{c} What non-matmul kernels account for non-trivial CUDA runtime in the forward pass?
 \deliverable{A 1--2 sentence response.}
 \begin{answer}
+Besides matrix multiplications, non-trivial forward-pass CUDA time came from elementwise kernels such as division, \texttt{where}, add, multiply, exponentiation, sigmoid, copy/concat kernels, and reduction kernels used for max, sum, and normalization.
+For the XL model at context length $1024$, matrix multiplications accounted for $86.8\%$ of GPU kernel time, leaving about $13.2\%$ for these non-matmul kernels.
 \end{answer}
 
 \subq{d} Profile a complete training step (forward, loss, backward, AdamW step). How does the matmul fraction change vs.\ inference? What about other kernels?
 \deliverable{A 1--2 sentence response.}
 \begin{answer}
+For the small model at context length $1024$, the matmul fraction dropped from $69.6\%$ in forward-only to $64.7\%$ in the full forward+backward+optimizer step.
+For the XL model, it dropped from $86.8\%$ to $82.3\%$. This happens because backward and AdamW introduce many additional pointwise/vectorized kernels, so non-matmul work becomes a larger fraction even though GEMMs still dominate.
 \end{answer}
 
 \subq{e} Compare softmax runtime to attention matmul runtime in the forward pass. How does the runtime ratio compare to the FLOP ratio?
 \deliverable{A 1--2 sentence response.}
 \begin{answer}
+The softmax operation did not appear as one fused softmax kernel; it was decomposed into max reductions, exponentials, sum reductions, and division.
+For the XL model at context length $1024$, these softmax-like kernels were roughly $4$--$5\%$ of forward GPU kernel time, while matmuls were $86.8\%$. Thus matmul runtime was about an order of magnitude larger, much less extreme than the FLOP gap, because softmax is memory-, reduction-, and special-function-heavy and runs less efficiently than Tensor Core GEMMs.
 \end{answer}
 
 
@@ -193,6 +226,16 @@ Profile the forward pass, backward pass, and optimizer step with \texttt{nsys} f
 Run the accumulation snippet with FP32 / FP16 / mixed accumulators and comment on the accuracy.
 \deliverable{A 2--3 sentence response.}
 \begin{answer}
+  The resulting answer to the code is below:
+
+  tensor(10.0001)
+  tensor(9.9531, dtype=torch.float16)
+  tensor(10.0021)
+  tensor(10.0021)
+
+  All of the answers were off, but the float16 was off the most and the errors went down as you increased the precision.
+  This is because 0.01 is not representable exactly in base-2, so there were slight rounding errors with each addition, and 
+  the cumulative error was the most for the float16 answers, which had the most rounding error per operation. 
 \end{answer}
 
 
@@ -202,23 +245,49 @@ Run the accumulation snippet with FP32 / FP16 / mixed accumulators and comment o
 \deliverable{The data types for each of the components listed above.}
 \begin{answer}
 \begin{itemize}[leftmargin=*]
-  \item Model parameters (in autocast):
-  \item Output of \texttt{fc1}:
-  \item Output of \texttt{ln}:
-  \item Predicted logits:
-  \item Loss:
-  \item Gradients:
+  \item Model parameters (in autocast): model parameters remain in FP32 for storage
+  \item Output of \texttt{fc1}: The linear layers are done in FP16 under autocast, so the output would be FP16.
+  \item Output of \texttt{ln}: FP32
+  \item Predicted logits: FP16
+  \item Loss: FP32
+  \item Gradients: FP32
 \end{itemize}
 \end{answer}
 
 \subq{b} What parts of layer normalization are sensitive to mixed precision? Does BF16 vs FP16 change whether you need to treat LN differently? Why?
 \deliverable{A 2--3 sentence response.}
 \begin{answer}
+  The mean/variance computation part of the layernorm is sensitive to mixed precision (subtracting the mean, squaring, summing, divison) since they can lose
+  accuracy under FP16, so you have to make sure they are in FP32. 
+  BF16 has a wider dynamic range, giving it more training stability for layer normalization, so you probably don't need to cast it into FP32, but
+  it has low mantissa precision, so accuracy may be worse. 
 \end{answer}
 
 \subq{c} Benchmark full precision vs BF16 mixed precision for each model size, noting trends with model size.
 \deliverable{A 2--3 sentence response with timings and commentary.}
 \begin{answer}
+  \begin{table}[H]
+    \caption{Benchmark results across model sizes with mixed precision.}
+    \centering
+    \label{tab:model-benchmark-mixed-precision-results}
+    \begin{tabular}{lll}
+    \toprule
+    Size & forward & forward-back \\
+    \midrule
+    small & 0.0156 ± 0.0000 & 0.0475 ± 0.0018 \\
+    med & 0.0396 ± 0.0000 & 0.1145 ± 0.0001 \\
+    large & 0.0730 ± 0.0001 & 0.2180 ± 0.0132 \\
+    xl & 0.1113 ± 0.0000 & 0.3475 ± 0.0139 \\
+    10b & 0.2519 ± 0.0005 & 0.8117 ± 0.0069 \\
+    \bottomrule
+    \end{tabular}
+    \end{table}    
+
+    (See question 1b for comparison full precision table)
+
+    The mixed precision runs ran faster than the full precision runs in general. 
+    The differences in run time was more dramatic as we increased model size, saving 
+    us much more time.
 \end{answer}
 
 
@@ -233,8 +302,19 @@ Profile the xl model with context lengths 128 and 2048 (forward-only and full tr
 \subq{a} Show the ``Active memory timeline'' for a forward pass and a full training step. Can you tell which stage is which from the peaks?
 \deliverable{Two \texttt{memory\_viz} screenshots (forward-only, full training step) and a 2--3 sentence response.}
 \begin{answer}
-% \includegraphics[width=0.8\linewidth]{mem_fwd.png}
-% \includegraphics[width=0.8\linewidth]{mem_full.png}
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{\detokenize{Screenshot 2026-04-25 at 8.02.04 PM.png}}
+  \caption{Active memory timeline for the XL forward-only pass at context length 128.}
+  \label{fig:memory-forward-128}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{\detokenize{Screenshot 2026-04-25 at 8.01.40 PM.png}}
+  \caption{Active memory timeline for the XL full training step at context length 128.}
+  \label{fig:memory-full-step-128}
+\end{figure}
 \end{answer}
 
 \subq{b} Peak memory for each context length, forward pass vs.\ full training step.

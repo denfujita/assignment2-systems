@@ -1,10 +1,10 @@
 \contentsline {section}{\numberline {1}Profiling and Benchmarking}{1}{section.1}%
-\contentsline {section}{\numberline {2}Mixed Precision}{4}{section.2}%
-\contentsline {section}{\numberline {3}Memory Profiling}{5}{section.3}%
-\contentsline {section}{\numberline {4}Activation Checkpointing}{6}{section.4}%
-\contentsline {section}{\numberline {5}Attention and FlashAttention}{6}{section.5}%
-\contentsline {section}{\numberline {6}Distributed Data Parallel}{8}{section.6}%
-\contentsline {section}{\numberline {7}Optimizer State Sharding}{9}{section.7}%
-\contentsline {section}{\numberline {8}Fully-Sharded Data Parallel}{10}{section.8}%
-\contentsline {section}{\numberline {9}Parallelism Analysis (Written)}{11}{section.9}%
-\contentsline {section}{\numberline {10}Leaderboard (Optional)}{13}{section.10}%
+\contentsline {section}{\numberline {2}Mixed Precision}{5}{section.2}%
+\contentsline {section}{\numberline {3}Memory Profiling}{6}{section.3}%
+\contentsline {section}{\numberline {4}Activation Checkpointing}{7}{section.4}%
+\contentsline {section}{\numberline {5}Attention and FlashAttention}{7}{section.5}%
+\contentsline {section}{\numberline {6}Distributed Data Parallel}{9}{section.6}%
+\contentsline {section}{\numberline {7}Optimizer State Sharding}{10}{section.7}%
+\contentsline {section}{\numberline {8}Fully-Sharded Data Parallel}{11}{section.8}%
+\contentsline {section}{\numberline {9}Parallelism Analysis (Written)}{12}{section.9}%
+\contentsline {section}{\numberline {10}Leaderboard (Optional)}{14}{section.10}%

@@ -4,6 +4,8 @@ from pathlib import Path
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.nn_utils import cross_entropy
 from cs336_basics.optimizer import AdamW
+
+from contextlib import nullcontext
 import torch
 import numpy as np
 import modal
@@ -15,7 +17,7 @@ import os
 BATCH_SIZE = 4
 
 VOCAB_SIZE = 10_000
-CONTEXT_LENGTH = 512
+CONTEXT_LENGTH = 2048
 ROPE_THETA = 10_000.0
 
 small_hyperparam = {
@@ -69,7 +71,10 @@ ten_b_hyperparam = {
 }
 
 app = modal.App(name="gpu-benchmarking")
-vol = modal.Volume.from_name("nsight-profiles", create_if_missing=True)
+# vol = modal.Volume.from_name(f"xl-forward-back-optimizer_{CONTEXT_LENGTH}", create_if_missing=True)
+
+vol = modal.Volume.from_name(f"xl_memory_profile_{CONTEXT_LENGTH}", create_if_missing=True)
+
 
 def build_image(*, include_tests: bool = False) -> modal.Image:
     image = (
@@ -91,8 +96,8 @@ def build_image(*, include_tests: bool = False) -> modal.Image:
 
 image = build_image()
 
-@app.function(image=image, gpu="B200")
-def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mode: str):
+@app.function(image=image, gpu="B200", volumes={"/profiles": vol})
+def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mode: str, mixed_precision: bool, memory_measurement: bool):
     """
     Initialize a BasicsTransformerLM, create random data, and benchmark:
     - forward
@@ -101,72 +106,99 @@ def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mod
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # initialize model
     torch.manual_seed(0)
+    model = BasicsTransformerLM(hyperparams["vocab_size"], 
+                                hyperparams["context_length"], 
+                                hyperparams["d_model"],
+                                hyperparams["num_layers"],
+                                hyperparams["num_heads"],
+                                hyperparams["d_ff"],
+                                hyperparams["rope_theta"])
+    model = model.to(device)
 
-    # initialize LM
-    model = BasicsTransformerLM(
-        hyperparams["vocab_size"],
-        hyperparams["context_length"],
-        hyperparams["d_model"],
-        hyperparams["num_layers"],
-        hyperparams["num_heads"],
-        hyperparams["d_ff"],
-        hyperparams["rope_theta"],
-    ).to(device)
+    # generate random batch of data
+    data = torch.randint(0, hyperparams["vocab_size"], (BATCH_SIZE, hyperparams["context_length"]), device=device)
+    targets = torch.randint(0, hyperparams["vocab_size"], (BATCH_SIZE, hyperparams["context_length"]), device=device)
 
-    # initialize train and target data
-    data = torch.randint(
-        0,
-        hyperparams["vocab_size"],
-        (BATCH_SIZE, hyperparams["context_length"]),
-        device=device,
-    )
-    targets = torch.randint(
-        0,
-        hyperparams["vocab_size"],
-        (BATCH_SIZE, hyperparams["context_length"]),
-        device=device,
-    )
-
-    optimizer = AdamW(model.parameters()) if mode == "forward-back-optimizer" else None
-
-    def run_step():
-        if mode == "forward":
-            with torch.no_grad():
-                return model(data)
-
-        output = model(data)
-        loss = cross_entropy(output, targets)
-
-        if optimizer is not None:
+    times = [] 
+    if mode == "forward":
+        with torch.no_grad(): # forward only, no need to store gradient mappings
+            cast = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if mixed_precision else nullcontext() # optionally used mixed precision 
+            with cast:
+                for i in range(num_warmups): # warm up
+                    model(data)
+                torch.cuda.synchronize() # synch cuda before starting real timer
+                if memory_measurement: # measures memory 
+                    torch.cuda.memory._record_memory_history(max_entries=1000000)
+                for i in range(num_steps): 
+                    start = timeit.default_timer()
+                    model(data)
+                    torch.cuda.synchronize()
+                    end = timeit.default_timer()
+                    times.append(end - start)
+                times = np.array(times)
+                if memory_measurement:
+                    torch.cuda.memory._dump_snapshot("/profiles/memory_snapshot.pickle")
+                    torch.cuda.memory._record_memory_history(enabled=None)
+                    vol.commit()
+                return np.mean(times), np.std(times)
+    elif mode == "forward-back":
+            # forward-back warmup
+        for i in range(num_warmups):
+            model.zero_grad(set_to_none=True)
+            cast = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if mixed_precision else nullcontext()
+            with cast:
+                output = model(data)    
+                loss = cross_entropy(output, targets)
+            loss.backward()
+        model.zero_grad(set_to_none=True)
+        torch.cuda.synchronize()
+        for i in range(num_steps):
+            start = timeit.default_timer()
+            cast = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if mixed_precision else nullcontext()
+            with cast:
+                output = model(data)
+                loss = cross_entropy(output, targets)
+            loss.backward()
+            torch.cuda.synchronize()
+            end = timeit.default_timer()
+            times.append(end - start)
+            model.zero_grad(set_to_none=True)
+        times = np.array(times)
+        return np.mean(times), np.std(times)
+    else: # forward backward and optimizer 
+# optimizer warmup
+        optimizer = AdamW(model.parameters())
+        for i in range(num_warmups):
             optimizer.zero_grad(set_to_none=True)
+            output = model(data)
+            loss = cross_entropy(output, targets)
             loss.backward()
             optimizer.step()
-        else:
-            loss.backward()
-            model.zero_grad(set_to_none=True)
-
-        return loss
-
-    # warm up
-    for _ in range(num_warmups):
-        run_step()
-
-    torch.cuda.synchronize()
-
-    # measure
-    times = []
-    for _ in range(num_steps):
-        start = timeit.default_timer()
-        run_step()
+        optimizer.zero_grad(set_to_none=True)
         torch.cuda.synchronize()
-        end = timeit.default_timer()
-
-        times.append(end - start)
-
-    times = np.array(times)
-    return np.mean(times), np.std(times)
-
+# optimizer measured
+        nvtx.range_push("forward-back-optimizer")
+        if memory_measurement:
+            torch.cuda.memory._record_memory_history(max_entries=1000000)
+        for i in range(num_steps):
+            start = timeit.default_timer()
+            optimizer.zero_grad(set_to_none=True)
+            output = model(data)
+            loss = cross_entropy(output, targets)
+            loss.backward()
+            optimizer.step()
+            torch.cuda.synchronize()
+            end = timeit.default_timer()
+            times.append(end - start)
+        if memory_measurement:
+            torch.cuda.memory._dump_snapshot("/profiles/memory_snapshot_forwardbackoptimizer.pickle")
+            torch.cuda.memory._record_memory_history(enabled=None)
+            vol.commit()
+        nvtx.range_pop()
+        times = np.array(times)
+        return np.mean(times), np.std(times)
 
 def generate_latex_table(setup, result) -> None:
     import pandas as pd
@@ -199,7 +231,7 @@ def generate_latex_table(setup, result) -> None:
         label="tab:model-benchmark-results",
     )
 
-    Path("benchmarking_one_warmups_results.tex").write_text(latex)
+    Path("benchmarking_mixed_precision.tex").write_text(latex)
 
 @app.function(
     image=image,
@@ -207,30 +239,32 @@ def generate_latex_table(setup, result) -> None:
     volumes={"/profiles": vol},
     timeout=60 * 30,
 )
-def profile_on_modal(mode: str = "forward"):
-    out = f"/profiles/benchmark_{mode}"
+def profile_on_modal(mode: str):
+    out = f"/profiles/benchmark_xl_{mode}_{CONTEXT_LENGTH}"
 
     cmd = [
         "nsys", "profile",
-        "--trace=cuda,nvtx,cublas,cudnn,osrt",
-        "--stats=true",
+        "--trace=cuda,cudnn,cublas,osrt,nvtx",
+        "--pytorch=functions-trace,autograd-shapes-nvtx",
+        # "--capture-range=nvtx",
+        # "--nvtx-capture=measure",
+        # "--cudabacktrace=all",
+        # "--python-backtrace=cuda",
         "--force-overwrite=true",
         "-o", out,
         "python", __file__,
         "--worker",
         "--mode", mode,
         "--num-warmups", "5",
-        "--num-steps", "1",
+        "--num-steps", "10",
     ]
 
     env = os.environ.copy()
     env["PYTORCH_ALLOC_CONF"] = "backend:cudaMallocAsync"
-    env["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
 
     subprocess.run(cmd, env=env, check=True)
 
-    subprocess.run(cmd, check=True)
-    vol.commit()
+    # vol.commit()
     return f"{out}.nsys-rep"
 
 if __name__ == "__main__":
@@ -238,11 +272,11 @@ if __name__ == "__main__":
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--mode", choices=["forward", "forward-back", "forward-back-optimizer"])
     parser.add_argument("--num-warmups", type=int, default=5)
-    parser.add_argument("--num-steps", type=int, default=1)
+    parser.add_argument("--num-steps", type=int, default=10)
     args = parser.parse_args()
 
     if args.worker:
-        hyperparams = small_hyperparam
+        hyperparams = xl_hyperparam
 
         mean, std = benchmarking_script.local(
             args.num_warmups,
@@ -255,19 +289,26 @@ if __name__ == "__main__":
 
 @app.local_entrypoint()
 def modal_main() -> None:
-    report_path = profile_on_modal.remote("forward")
-    print(report_path)
+    # used in nsys question
+    # report_path = profile_on_modal.remote("forward-back-optimizer")
+    # print(report_path)
 
     # used in benchmarking question
 
-    # eval_params = []
-    # setup = []
+    eval_params = []
+    setup = []
     
-    # # for model_type, hyperparam in [("small", small_hyperparam), ("med", medium_hyperparam), ("large", large_hyperparam), ("xl", xl_hyperparam), ("10b", ten_b_hyperparam)]:
-    # #     for mode in ["forward", "forward-back", "forward-back-optimizer"]:
-    # #         eval_params.append((1, 10, hyperparam, mode))
-    # #         setup.append((model_type, mode))
+    # for model_type, hyperparam in [("small", small_hyperparam), ("med", medium_hyperparam), ("large", large_hyperparam), ("xl", xl_hyperparam), ("10b", ten_b_hyperparam)]:
+    #     for mode in ["forward", "forward-back"]:
+    #         eval_params.append((5, 10, hyperparam, mode, True, True))
+    #         setup.append((model_type, mode))
 
-    # # result = list(benchmarking_script.starmap(eval_params, return_exceptions=True))
-    # # latex = generate_latex_table(setup, result)
-    # # return latex
+    # memory profile xl
+    for model_type, hyperparam in [("xl", xl_hyperparam)]:
+        for mode in ["forward", "forward-back-optimizer"]:
+            eval_params.append((5, 10, hyperparam, mode, True, True))
+            setup.append((model_type, mode))
+
+    result = list(benchmarking_script.starmap(eval_params, return_exceptions=True))
+    # latex = generate_latex_table(setup, result)
+    # return latex

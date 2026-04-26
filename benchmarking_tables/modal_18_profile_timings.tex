@@ -1,0 +1,17 @@
+\begin{table}
+\centering
+\caption{Modal B200 profile timings with 5 warmup steps and 10 measured steps. Each cell is mean $\pm$ standard deviation in seconds.}
+\label{tab:modal-18-profile-timings}
+\begin{tabular}{llccc}
+\toprule
+Model & Context & Forward & Forward + Backward & Forward + Backward + Optimizer \\
+\midrule
+small & 256 & $0.0290 \pm 0.0001$ & $0.0540 \pm 0.0014$ & $0.0792 \pm 0.0041$ \\
+small & 512 & $0.0178 \pm 0.0001$ & $0.1099 \pm 0.0053$ & $0.0842 \pm 0.0114$ \\
+small & 1024 & $0.0372 \pm 0.0001$ & $0.1126 \pm 0.0113$ & $0.1199 \pm 0.0066$ \\
+xl & 256 & $0.1566 \pm 0.0002$ & $0.4590 \pm 0.0005$ & $0.5885 \pm 0.1276$ \\
+xl & 512 & $0.2953 \pm 0.0005$ & $0.8713 \pm 0.0011$ & $0.9523 \pm 0.0008$ \\
+xl & 1024 & $0.5837 \pm 0.0001$ & $1.7298 \pm 0.0005$ & $1.8152 \pm 0.0007$ \\
+\bottomrule
+\end{tabular}
+\end{table}

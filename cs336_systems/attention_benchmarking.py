@@ -43,48 +43,70 @@ image = build_image()
 def pytorch_attention(d_model: int, seq_len: int): 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    Q = torch.randn(BATCH, seq_len, d_model, requires_grad=True, device=device)
-    K = torch.randn(BATCH, seq_len, d_model, requires_grad = True, device=device) 
-    V = torch.randn(BATCH, seq_len, d_model, requires_grad=True, device=device)
-
+    Q = torch.randn(BATCH, seq_len, d_model, device=device)
+    K = torch.randn(BATCH, seq_len, d_model, device=device) 
+    V = torch.randn(BATCH, seq_len, d_model, device=device)
+    
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)  
 
     # warm up
+    attn = torch.compile(scaled_dot_product_attention)
     for i in range(NUM_WARMUPS):
-        scaled_dot_product_attention(Q, K, V)
+        v = attn(Q, K, V)
     torch.cuda.synchronize()
 
     forward_oom = False
     back_oom = False
 
+    forward_time = 0
     try:
         start.record()
         for i in range(NUM_STEPS):
-            output = scaled_dot_product_attention(Q, K, V)
+            v = attn(Q, K, V)
             torch.cuda.synchronize()
         end.record()
+        torch.cuda.synchronize()
         forward_time = start.elapsed_time(end)
-    except Exception as e:
+    except torch.cuda.OutOfMemoryError as e:
         forward_oom = True
-    backward_mem = torch.cuda.memory_allocated()
+        torch.cuda.empty_cache()
 
+    Q = torch.randn(BATCH, seq_len, d_model, requires_grad=True, device=device)
+    K = torch.randn(BATCH, seq_len, d_model, requires_grad = True, device=device) 
+    V = torch.randn(BATCH, seq_len, d_model, requires_grad=True, device=device)
+
+    total_back_mem = 0
     try: 
+        def attention_loss(Q, K, V):
+            return scaled_dot_product_attention(Q, K, V).sum()
+        compiled_loss = torch.compile(attention_loss)
+
+        for i in range(NUM_WARMUPS):
+            output = compiled_loss(Q, K, V)
+            output.backward()
+
+        Q.grad = K.grad = V.grad = None
+        torch.cuda.synchronize()
+
         total_backward_ms = 0.0
         bwd_start = torch.cuda.Event(enable_timing=True)
         bwd_end = torch.cuda.Event(enable_timing=True)
+
         for i in range(NUM_STEPS):
-            output = scaled_dot_product_attention(Q, K, V)
+            loss = compiled_loss(Q, K, V)
+            total_back_mem += torch.cuda.memory_allocated()
             torch.cuda.synchronize()
             bwd_start.record()
-            output.sum().backward()
+            loss.backward()
             bwd_end.record()
             torch.cuda.synchronize()
             total_backward_ms += bwd_start.elapsed_time(bwd_end)
-    except Exception as e:
+        total_back_mem /= NUM_STEPS
+    except torch.cuda.OutOfMemoryError as e:
         back_oom = True
 
-    return (forward_time / NUM_STEPS, backward_mem / 1024**2, total_backward_ms / NUM_STEPS, forward_oom, back_oom)
+    return (forward_time / NUM_STEPS, total_back_mem / 1024**2, total_backward_ms / NUM_STEPS, forward_oom, back_oom)
 
 @app.local_entrypoint()
 def modal_main():

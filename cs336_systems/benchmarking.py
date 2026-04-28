@@ -17,7 +17,7 @@ import os
 BATCH_SIZE = 4
 
 VOCAB_SIZE = 10_000
-CONTEXT_LENGTH = 2048
+CONTEXT_LENGTH = 128
 ROPE_THETA = 10_000.0
 
 small_hyperparam = {
@@ -73,7 +73,9 @@ ten_b_hyperparam = {
 app = modal.App(name="gpu-benchmarking")
 # vol = modal.Volume.from_name(f"xl-forward-back-optimizer_{CONTEXT_LENGTH}", create_if_missing=True)
 
-vol = modal.Volume.from_name(f"xl_memory_profile_{CONTEXT_LENGTH}", create_if_missing=True)
+# vol = modal.Volume.from_name(f"xl_memory_profile_{CONTEXT_LENGTH}_mixed_precision1", create_if_missing=True)
+
+vol = modal.Volume.from_name(f"xl_forward_backward_nsys1", create_if_missing=True)
 
 
 def build_image(*, include_tests: bool = False) -> modal.Image:
@@ -139,7 +141,7 @@ def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mod
                     times.append(end - start)
                 times = np.array(times)
                 if memory_measurement:
-                    torch.cuda.memory._dump_snapshot("/profiles/memory_snapshot.pickle")
+                    torch.cuda.memory._dump_snapshot(f"/profiles/memory_snapshot_{mode}_mixed_precision:{mixed_precision}_{CONTEXT_LENGTH}.pickle")
                     torch.cuda.memory._record_memory_history(enabled=None)
                     vol.commit()
                 return np.mean(times), np.std(times)
@@ -172,8 +174,10 @@ def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mod
         optimizer = AdamW(model.parameters())
         for i in range(num_warmups):
             optimizer.zero_grad(set_to_none=True)
-            output = model(data)
-            loss = cross_entropy(output, targets)
+            cast = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if mixed_precision else nullcontext() # optionally used mixed precision 
+            with cast:
+                output = model(data)
+                loss = cross_entropy(output, targets)
             loss.backward()
             optimizer.step()
         optimizer.zero_grad(set_to_none=True)
@@ -185,15 +189,17 @@ def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mod
         for i in range(num_steps):
             start = timeit.default_timer()
             optimizer.zero_grad(set_to_none=True)
-            output = model(data)
-            loss = cross_entropy(output, targets)
+            cast = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if mixed_precision else nullcontext() # optionally used mixed precision 
+            with cast:
+                output = model(data)
+                loss = cross_entropy(output, targets)
             loss.backward()
             optimizer.step()
             torch.cuda.synchronize()
             end = timeit.default_timer()
             times.append(end - start)
         if memory_measurement:
-            torch.cuda.memory._dump_snapshot("/profiles/memory_snapshot_forwardbackoptimizer.pickle")
+            torch.cuda.memory._dump_snapshot("/profiles/memory_snapshot_forwardbackoptimizer_mixed_precision.pickle")
             torch.cuda.memory._record_memory_history(enabled=None)
             vol.commit()
         nvtx.range_pop()
@@ -244,6 +250,7 @@ def profile_on_modal(mode: str):
 
     cmd = [
         "nsys", "profile",
+        "--cuda-memory-usage=true",
         "--trace=cuda,cudnn,cublas,osrt,nvtx",
         "--pytorch=functions-trace,autograd-shapes-nvtx",
         # "--capture-range=nvtx",
@@ -260,11 +267,12 @@ def profile_on_modal(mode: str):
     ]
 
     env = os.environ.copy()
-    env["PYTORCH_ALLOC_CONF"] = "backend:cudaMallocAsync"
+    # env["PYTORCH_ALLOC_CONF"] = "backend:cudaMallocAsync"
 
-    subprocess.run(cmd, env=env, check=True)
+    # subprocess.run(cmd, env=env, check=True)
+    subprocess.run(cmd, check=True)
 
-    # vol.commit()
+    vol.commit()
     return f"{out}.nsys-rep"
 
 if __name__ == "__main__":
@@ -272,7 +280,7 @@ if __name__ == "__main__":
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--mode", choices=["forward", "forward-back", "forward-back-optimizer"])
     parser.add_argument("--num-warmups", type=int, default=5)
-    parser.add_argument("--num-steps", type=int, default=10)
+    parser.add_argument("--num-steps", type=int, default=1)
     args = parser.parse_args()
 
     if args.worker:
@@ -283,6 +291,8 @@ if __name__ == "__main__":
             args.num_steps,
             hyperparams,
             args.mode,
+            False,
+            False,
         )
 
         print(f"{args.mode}: {mean:.4f} ± {std:.4f}")
@@ -290,8 +300,8 @@ if __name__ == "__main__":
 @app.local_entrypoint()
 def modal_main() -> None:
     # used in nsys question
-    # report_path = profile_on_modal.remote("forward-back-optimizer")
-    # print(report_path)
+    report_path = profile_on_modal.remote("forward-back")
+    print(report_path)
 
     # used in benchmarking question
 
@@ -304,11 +314,11 @@ def modal_main() -> None:
     #         setup.append((model_type, mode))
 
     # memory profile xl
-    for model_type, hyperparam in [("xl", xl_hyperparam)]:
-        for mode in ["forward", "forward-back-optimizer"]:
-            eval_params.append((5, 10, hyperparam, mode, True, True))
-            setup.append((model_type, mode))
+    # for model_type, hyperparam in [("xl", xl_hyperparam)]:
+    #     for mode in ["forward", "forward-back-optimizer"]:
+    #         eval_params.append((5, 10, hyperparam, mode, True, True))
+    #         setup.append((model_type, mode))
 
-    result = list(benchmarking_script.starmap(eval_params, return_exceptions=True))
+    # result = list(benchmarking_script.starmap(eval_params, return_exceptions=True))
     # latex = generate_latex_table(setup, result)
     # return latex

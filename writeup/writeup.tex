@@ -13,6 +13,8 @@
 \usepackage{seqsplit}
 \usepackage{parskip}
 \usepackage{float}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
 
 \hypersetup{
   colorlinks=true,
@@ -301,20 +303,26 @@ Profile the xl model with context lengths 128 and 2048 (forward-only and full tr
 
 \subq{a} Show the ``Active memory timeline'' for a forward pass and a full training step. Can you tell which stage is which from the peaks?
 \deliverable{Two \texttt{memory\_viz} screenshots (forward-only, full training step) and a 2--3 sentence response.}
-\begin{answer}
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{\detokenize{Screenshot 2026-04-25 at 8.02.04 PM.png}}
-  \caption{Active memory timeline for the XL forward-only pass at context length 128.}
-  \label{fig:memory-forward-128}
-\end{figure}
 
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=\linewidth]{\detokenize{Screenshot 2026-04-25 at 8.01.40 PM.png}}
-  \caption{Active memory timeline for the XL full training step at context length 128.}
-  \label{fig:memory-full-step-128}
-\end{figure}
+\begin{answer}
+\begin{center}
+  \includegraphics[width=\linewidth]{memory_forward.png}
+
+  \small Active memory timeline for the XL forward-only pass at context length 128.
+\end{center}
+
+\begin{center}
+  \includegraphics[width=\linewidth]{memory_forward_back_optimizer.png}
+
+  \small Active memory timeline for the XL full training step at context length 128.
+\end{center}
+
+For the forward pass, my memory timeline looks flat, which makes sense since the forward pass doesn't include any 
+memory intensive activites (when running $@torch.no\_grad()$ as well). 
+
+On the other hand, the full training pipeline has memory graph of repeated saw-tooth like
+patterns, this is probably from the memory accumulation during forward (saving activations), then 
+you see a sudden drop after loss.backward() is ran and the activations are freed after gradient computation. 
 \end{answer}
 
 \subq{b} Peak memory for each context length, forward pass vs.\ full training step.
@@ -325,8 +333,8 @@ Profile the xl model with context lengths 128 and 2048 (forward-only and full tr
 \toprule
 Context length & Forward-only peak (MiB) & Full-step peak (MiB) \\
 \midrule
-128 & & \\
-2048 & & \\
+128 & 12.8GiB & 51.2GiB\\
+2048 & 21.2GiB& OOM \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -335,21 +343,64 @@ Context length & Forward-only peak (MiB) & Full-step peak (MiB) \\
 \subq{c} Peak memory with mixed precision (forward-only and full step). Does MP significantly affect memory?
 \deliverable{A 2--3 sentence response.}
 \begin{answer}
+2048 context length with mixed precision for just a forward step has a peak memory of 25.4GiB, the 128 context length with mixed precision has
+19GiB at peak, and the 128 full step has 51.2GiB at peak. Mixed precision does not significantly reduce memory usage. I suspect this is because 
+of the overhead that torch.autocast brings.
 \end{answer}
 
 \subq{d} Size of a residual-stream activation tensor for the xl config in FP32, in MiB.
 \deliverable{A 1--2 sentence response with your derivation.}
 \begin{answer}
+  In single precision (FP32), for model context length of 128, batch size of 4, embedding dimension of 
+  2560, and at 4 bytes per number (FP32), the size of a tensor of activations would be 5,242,880 bytes. 
+  $5,242,880 / 1024^2 $= 5MiB
 \end{answer}
 
 \subq{e} Using \texttt{memory\_viz} at low Detail on the xl forward pass, what is the size of the largest shown allocations? Where (by stack trace) do they come from?
 \deliverable{A 1--2 sentence response.}
 \begin{answer}
+The largest shown allocation is 100MiB. According to the stack trace, this block existed before the capture memory was called. This means that the 
+block as activation memory from the measured forward/backward pass. It is more likely persistent/background CUDA allocator memory, such as 
+model parameters, cached allocator segments, workspace memory, or tensors created during warmup/setup.
+
+
 \end{answer}
 
 \subq{f} Using Nsight memory profiling + NVTX labels, how much memory is saved for backward by a single TransformerBlock? List the 5 largest contributing operations and their \% of total. Then estimate gradient tensor memory for a TransformerBlock from the backward-pass deltas.
 \deliverable{Screenshots from Nsight Systems and a 1--2 paragraph response.}
 \begin{answer}
+\begin{center}
+  \includegraphics[width=\linewidth]{nsys.png}
+  \small Nsight Systems memory profiling with NVTX labels.
+\end{center}
+
+For the xl model, I measured one TransformerBlock using Nsight Systems with CUDA memory
+profiling enabled and PyTorch NVTX labels. Nsight reported total CUDA memory around 19 GiB,
+while \texttt{torch.cuda.memory\_allocated()} reported a little over 13 GiB. I used the
+PyTorch allocated-memory deltas for saved residual tensors because \texttt{memory\_allocated()}
+tracks live PyTorch tensor memory, whereas Nsight also includes allocator caching,
+reserved blocks, CUDA runtime memory, and temporary library workspaces. The total saved
+forward memory for one TransformerBlock was about 180 MiB. The five largest contributors were
+\texttt{ffn.w3 aten::linear} at 20.00 MiB (11.09\%),
+\texttt{ffn.w1 aten::linear} at 20.00 MiB (11.09\%),
+\texttt{ffn.silu aten::silu} at 20.00 MiB (11.09\%),
+\texttt{ffn.gate aten::mul} at 20.00 MiB (11.09\%), and
+\texttt{attn.softmax aten::softmax} at 16.19 MiB (8.97\%).
+
+During the backward pass, the saved forward tensors are freed while gradient tensors are
+allocated at the same time. In the Nsight trace, the memory usage decreases by about
+180 MiB across a single \texttt{TransformerBlock} backward range, which approximately
+matches the amount of memory saved during the forward pass. This indicates that the memory
+freed from activation tensors largely cancels out the memory allocated for gradients, due
+to allocator reuse and overlapping lifetimes. As a result, the net change in memory usage
+does not directly reflect the gradient tensor size.
+
+However, we still expect the gradient memory to be on the order of the parameter size of
+the block, since each parameter produces one gradient tensor of the same shape. This is
+much smaller than the activation memory saved during the forward pass, which scales with
+batch size and sequence length. The observed behavior therefore matches expectations:
+activation memory dominates in the forward pass, while gradient memory is comparatively
+smaller and masked by memory reuse during backward.
 \end{answer}
 
 
@@ -362,11 +413,55 @@ Context length & Forward-only peak (MiB) & Full-step peak (MiB) \\
 \subq{a} For a Transformer of $N$ identical blocks, what checkpointing strategy minimizes peak activation memory (ignoring compute)? Give asymptotic peak memory and compute as a function of $N$, plus a short code sketch.
 \deliverable{A 3--5 sentence description plus a short code sketch.}
 \begin{answer}
+  If we only care about memory and can sacrifice compute as much as we want, we can use a fully nested (recursive) checkpointing strategy: for block $i$, checkpoint the entire prefix $0,\dots,i-1$, then execute block $i$ normally. During backward, each checkpoint recomputes its prefix just-in-time, so at any moment only $O(1)$ block residuals are alive.
+  Thus, the peak activation memory is
+  \[
+  M(N) = \Theta(1),
+  \]
+  which is optimal up to constants. However, the compute cost is
+  \[
+  C(N) = \Theta(N^2),
+  \]
+  since prefixes are recomputed repeatedly:
+  \[
+  N + (N-1) + \cdots + 1 = \Theta(N^2).
+  \]
+
+  A sample code looks like
+\begin{algorithm}[H]
+\caption{Recursive checkpointed prefix evaluation}
+\begin{algorithmic}[1]
+\Procedure{RunPrefix}{$\textit{blocks}, i, x$}
+  \If{$i = 0$}
+    \State \Return $\textit{blocks}[0](x)$
+  \EndIf
+  \State $h \gets \textsc{Checkpoint}(\lambda y.\ \textsc{RunPrefix}(\textit{blocks}, i-1, y),\ x)$
+  \State \Return $\textit{blocks}[i](h)$
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
 \end{answer}
 
 \subq{b} For the xl model (batch size 4, seq len 2048) with a budget of \emph{one} step of recomputation (no nesting), what is the best checkpointing block size? Validate with peak-memory profiles, comparing the next-smaller and next-larger block sizes.
 \deliverable{A 3--5 sentence description plus measured peak memory.}
 \begin{answer}
+  For the xl config with $N=32$, the best one-step strategy is to wrap the
+entire stack of 32 Transformer blocks in a single checkpoint call. In the
+ideal activation-only model, checkpointing 32 blocks instead of 31 blocks saves
+only one extra residual stream tensor:
+\[
+4 \cdot 2048 \cdot 1600 \cdot 2 \text{ bytes}
+\approx 25 \text{ MiB}
+\approx 0.024 \text{ GiB}.
+\]
+This is tiny relative to the full training-step peak, which is dominated by
+persistent model parameters, gradients, optimizer state, CUDA allocator
+reserved memory, and temporary library workspaces. Consistent with this, my
+profiles showed essentially no measurable peak-memory change between the
+largest checkpoint size and the next-smaller checkpoint size. Thus I used one
+checkpoint around all 32 blocks, but the measured peak memory was effectively
+unchanged because the saved activation difference was too small compared with
+the optimizer-dominated baseline.
 \end{answer}
 
 
@@ -379,6 +474,33 @@ Context length & Forward-only peak (MiB) & Full-step peak (MiB) \\
 \subq{a} Benchmark PyTorch attention across head dims $\{16, 32, 64, 128\}$ and seq lens $\{256, 1024, 4096, 8192, 16384\}$ (batch size 8, no multi-head dim). Time 100 forward passes, measure memory before backward, time 100 backward passes. At what size do you get OOM? Do the memory accounting for one small OOM config, describe how saved-for-backward memory scales with seq len, and what you'd do to eliminate this cost.
 \deliverable{A table with timings, memory calculations, and a 1--2 paragraph response.}
 \begin{answer}
+  \centering
+  \begin{tabular}{rrrrr}
+    \toprule
+    $d_{\text{model}}$ & Seq len & Fwd (ms) & Mem before bwd (MiB) & Bwd (ms) \\
+    \midrule
+    16  & 256   & 0.133  & 12.648    & 0.827  \\
+    16  & 1024  & OOM    & OOM       & OOM    \\
+    16  & 4096  & OOM    & OOM       & OOM    \\
+    16  & 8192  & OOM    & OOM       & OOM    \\
+    16  & 16384 & 26.412 & 21644.969 & 56.775 \\
+    32  & 256   & 0.073  & 13.148    & 0.464  \\
+    32  & 1024  & OOM    & OOM       & OOM    \\
+    32  & 4096  & OOM    & OOM       & OOM    \\
+    32  & 8192  & 7.428  & 4136.875  & 15.874 \\
+    32  & 16384 & 30.521 & 17574.219 & 58.111 \\
+    64  & 256   & 0.128  & 14.148    & 1.334  \\
+    64  & 1024  & 0.190  & 80.219    & 1.156  \\
+    64  & 4096  & 2.186  & 1064.500  & 5.286  \\
+    64  & 8192  & OOM    & OOM       & OOM    \\
+    64  & 16384 & 33.192 & 16529.750 & 68.693 \\
+    128 & 256   & OOM    & OOM       & OOM    \\
+    128 & 1024  & 0.229  & 88.219    & 1.392  \\
+    128 & 4096  & 2.689  & 5265.375  & 5.969  \\
+    128 & 8192  & 10.906 & 4232.875  & 22.892 \\
+    128 & 16384 & 42.239 & 16665.773 & 84.887 \\
+    \bottomrule
+  \end{tabular}
 \end{answer}
 
 

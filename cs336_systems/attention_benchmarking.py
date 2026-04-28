@@ -55,50 +55,52 @@ def pytorch_attention(d_model: int, seq_len: int):
         scaled_dot_product_attention(Q, K, V)
     torch.cuda.synchronize()
 
-    start.record()
-    for i in range(NUM_STEPS):
-        output = scaled_dot_product_attention(Q, K, V)
-        torch.cuda.synchronize()
-    end.record()
+    forward_oom = False
+    back_oom = False
 
-    forward_time = start.elapsed_time(end)
+    try:
+        start.record()
+        for i in range(NUM_STEPS):
+            output = scaled_dot_product_attention(Q, K, V)
+            torch.cuda.synchronize()
+        end.record()
+        forward_time = start.elapsed_time(end)
+    except Exception as e:
+        forward_oom = True
     backward_mem = torch.cuda.memory_allocated()
 
-    total_backward_ms = 0.0
-    bwd_start = torch.cuda.Event(enable_timing=True)
-    bwd_end = torch.cuda.Event(enable_timing=True)
-    for i in range(NUM_STEPS):
-        output = scaled_dot_product_attention(Q, K, V)
-        torch.cuda.synchronize()
-        bwd_start.record()
-        output.sum().backward()
-        bwd_end.record()
-        torch.cuda.synchronize()
-        total_backward_ms += bwd_start.elapsed_time(bwd_end)
+    try: 
+        total_backward_ms = 0.0
+        bwd_start = torch.cuda.Event(enable_timing=True)
+        bwd_end = torch.cuda.Event(enable_timing=True)
+        for i in range(NUM_STEPS):
+            output = scaled_dot_product_attention(Q, K, V)
+            torch.cuda.synchronize()
+            bwd_start.record()
+            output.sum().backward()
+            bwd_end.record()
+            torch.cuda.synchronize()
+            total_backward_ms += bwd_start.elapsed_time(bwd_end)
+    except Exception as e:
+        back_oom = True
 
-    return (forward_time / NUM_STEPS, backward_mem / 1024**2, total_backward_ms / NUM_STEPS)
+    return (forward_time / NUM_STEPS, backward_mem / 1024**2, total_backward_ms / NUM_STEPS, forward_oom, back_oom)
 
 @app.local_entrypoint()
 def modal_main():
     benchmark_results = pytorch_attention.starmap(attention_inputs, return_exceptions=True)
     rows = []
     for (d_model, seq_len), result in zip(attention_inputs, benchmark_results):
-        if isinstance(result, Exception):
+        if isinstance(result, Exception): 
+            continue
+        else: 
+            forward_ms, memory_mib, backward_ms, forward_oom, back_oom = result
             rows.append({
                 "d_model": d_model,
                 "seq_len": seq_len,
-                "forward_ms": "OOM",
-                "memory_before_backward_MiB": "OOM",
-                "backward_ms": "OOM",
-            })
-        else:
-            forward_ms, memory_mib, backward_ms = result
-            rows.append({
-                "d_model": d_model,
-                "seq_len": seq_len,
-                "forward_ms": forward_ms,
-                "memory_before_backward_MiB": memory_mib,
-                "backward_ms": backward_ms,
+                "forward_ms": "oom" if forward_oom else forward_ms,
+                "memory_before_backward_MiB": "oom" if back_oom or forward_oom else memory_mib,
+                "backward_ms": "oom" if back_oom else backward_ms,
             })
 
     df = pd.DataFrame(rows).sort_values(["d_model", "seq_len"])

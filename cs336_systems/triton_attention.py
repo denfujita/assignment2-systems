@@ -6,7 +6,7 @@ import math
 class SpeedyTritonAttention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, Q, K, V):
+    def forward(ctx, Q, K, V, is_causal=False):
         B, Sq, D = Q.shape
         B, Sk, D = K.shape
 
@@ -15,7 +15,7 @@ class SpeedyTritonAttention(torch.autograd.Function):
         BLOCK_SIZE_Q = 128
         BLOCK_SIZE_KV = 32
 
-        grid = lambda x: (triton.cdiv(Sq, x["BLOCK_SIZE_Q"]), B, 1)
+        grid = lambda x: (triton.cdiv(Sq, x["Q_TILE_SIZE"]), B, 1)
 
         L = torch.empty((B, Sq), device=Q.device, dtype=torch.float32)
 
@@ -31,8 +31,9 @@ class SpeedyTritonAttention(torch.autograd.Function):
                                 D,
                                 BLOCK_SIZE_Q,
                                 BLOCK_SIZE_KV,
+                                is_causal,
                             )
-        ctx.save_for_backward(O)
+        ctx.save_for_backward(L, O)
         return O
 
     @staticmethod
@@ -53,6 +54,7 @@ def flash_fwd_kernel(
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
+    is_causal: tl.constexpr,
 ):
     # Program indices
     query_tile_index = tl.program_id(0)
@@ -74,6 +76,7 @@ def flash_fwd_kernel(
         strides=(stride_lq, ),
         offsets=(query_tile_index * Q_TILE_SIZE,),
         block_shape=(Q_TILE_SIZE, ),
+        order=(0, ),
     )
     # running qk^T max
     m_i = tl.zeros([Q_TILE_SIZE], dtype=tl.float32) - float("inf")
@@ -85,8 +88,6 @@ def flash_fwd_kernel(
 
     #assignment guarantees whole tiles, no need for mask
     q_tile = tl.load(Q_block_ptr)
-
-    tile_k_arange = tl.arange(0, K_TILE_SIZE)
 
     o_ptr = tl.make_block_ptr(
         O_ptr + batch_index * stride_ob,
@@ -127,11 +128,18 @@ def flash_fwd_kernel(
         )
 
         # masking 
-        # kv_indices = kv_token_idx + tile_k_arange
-        # mask = q_lens_mask & (
-        #   kv_indices[None, :] < N_KEYS
-        # )
-        # qk = tl.where(mask, qk, tl.cast(-float("inf"), qk.dtype))
+        if is_causal:
+            query_tile_start = query_tile_index * Q_TILE_SIZE
+            key_tile_start = kv_idx * K_TILE_SIZE
+
+            query_offsets = tl.arange(0, Q_TILE_SIZE)
+            key_offsets = tl.arange(0, K_TILE_SIZE)
+
+            query_positions = query_tile_start + query_offsets
+            key_positions = key_tile_start + key_offsets
+
+            mask = key_positions[None, :] <= query_positions[:, None]
+            qk = tl.where(mask, qk, tl.cast(-float("inf"), qk.dtype))
 
         # max over seq len
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
@@ -149,7 +157,6 @@ def flash_fwd_kernel(
         acc += tl.dot(p, v_tile)
 
         m_i = m_ij
-    
     acc = acc / l_i[:, None]
     tl.store(l_ptr, m_i + tl.math.log(l_i))
     tl.store(o_ptr, acc)

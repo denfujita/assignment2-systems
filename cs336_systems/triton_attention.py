@@ -1,12 +1,43 @@
 import torch
 import triton # type: ignore[import-not-found]
 import triton.language as tl # type: ignore[import-not-found]
+import math
 
 class SpeedyTritonAttention(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, Q, K, V):
-        
+        B, Sq, D = Q.shape
+        B, Sk, D = K.shape
+
+        O = torch.empty_like(Q)
+
+        BLOCK_SIZE_Q = 128
+        BLOCK_SIZE_KV = 32
+
+        grid = lambda x: (triton.cdiv(Sq, x["BLOCK_SIZE_Q"]), B, 1)
+
+        L = torch.empty((B, Sq), device=Q.device, dtype=torch.float32)
+
+        scale = 1 / math.sqrt(D) 
+        flash_fwd_kernel[grid](Q, K, V, O, L,
+                                Q.stride(0), Q.stride(1), Q.stride(2),
+                                K.stride(0), K.stride(1), K.stride(2),
+                                V.stride(0), V.stride(1), V.stride(2), 
+                                O.stride(0), O.stride(1), O.stride(2),
+                                L.stride(0), L.stride(1),
+                                Sq, Sk,
+                                scale, 
+                                D,
+                                BLOCK_SIZE_Q,
+                                BLOCK_SIZE_KV,
+                            )
+        ctx.save_for_backward(O)
+        return O
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError
 
 @triton.jit # type: ignore[import-not-found]
 def flash_fwd_kernel(

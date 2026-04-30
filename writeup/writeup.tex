@@ -474,6 +474,10 @@ the optimizer-dominated baseline.
 \subq{a} Benchmark PyTorch attention across head dims $\{16, 32, 64, 128\}$ and seq lens $\{256, 1024, 4096, 8192, 16384\}$ (batch size 8, no multi-head dim). Time 100 forward passes, measure memory before backward, time 100 backward passes. At what size do you get OOM? Do the memory accounting for one small OOM config, describe how saved-for-backward memory scales with seq len, and what you'd do to eliminate this cost.
 \deliverable{A table with timings, memory calculations, and a 1--2 paragraph response.}
 \begin{answer}
+  See table below, I don't get OOM for any of the configs (running on B200, 180GB memory). 
+  Note that I do not use a mask for the implementation and I'm just measuring the raw 
+  attention computation. The memory saved for backward scales quadratically with sequence length.
+  You can eliminate this memory cost by doing checkpointing or some methods in flash attention.
   \centering
   \begin{tabular}{rrrrr}
     \toprule
@@ -509,11 +513,88 @@ the optimizer-dominated baseline.
 \subq{a} Compare compiled vs.\ uncompiled PyTorch attention (same configs as above).
 \deliverable{A table comparing compiled vs.\ uncompiled forward/backward timings.}
 \begin{answer}
+  \begin{center}
+  \small
+  \begin{tabular}{rrrrr}
+    \toprule
+    $d_{\text{model}}$ & Seq len & Fwd (ms) & Mem before bwd (MiB) & Bwd (ms) \\
+    \midrule
+    16 & 256 & 0.042 & 21.153 & 0.176 \\
+    16 & 1024 & 0.093 & 83.861 & 0.243 \\
+    16 & 4096 & 0.757 & 1054.691 & 1.687 \\
+    16 & 8192 & 3.033 & 4141.131 & 6.150 \\
+    16 & 16384 & 11.245 & 16458.011 & 23.591 \\
+    32 & 256 & 0.042 & 22.025 & 0.175 \\
+    32 & 1024 & 0.099 & 87.346 & 0.261 \\
+    32 & 4096 & 0.844 & 1068.631 & 1.771 \\
+    32 & 8192 & 3.455 & 4169.011 & 6.554 \\
+    32 & 16384 & 12.712 & 16513.771 & 24.994 \\
+    64 & 256 & 0.065 & 23.767 & 0.543 \\
+    64 & 1024 & 0.163 & 94.316 & 0.305 \\
+    64 & 4096 & 1.274 & 1096.511 & 2.413 \\
+    64 & 8192 & 3.912 & 4224.771 & 8.206 \\
+    64 & 16384 & 18.419 & 16625.291 & 34.461 \\
+    128 & 256 & 0.076 & 27.252 & 0.528 \\
+    128 & 1024 & 0.183 & 108.256 & 0.613 \\
+    128 & 4096 & 1.767 & 1152.271 & 3.720 \\
+    128 & 8192 & 7.023 & 4336.291 & 13.751 \\
+    128 & 16384 & 26.961 & 16848.331 & 50.923 \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+
+  See below for a select comparison between the compiled and uncompiled versions.
+  For the largest sequence length, the compiled attention implementation is consistently faster:
+
+  \begin{center}
+  \small
+  \begin{tabular}{rrrrr}
+    \toprule
+    $d_{\text{model}}$ & Uncompiled fwd & Compiled fwd & Uncompiled bwd & Compiled bwd \\
+    \midrule
+    16  & 26.411 & 11.245 & 56.649 & 23.591 \\
+    32  & 27.908 & 12.712 & 58.417 & 24.994 \\
+    64  & 32.886 & 18.419 & 67.961 & 34.461 \\
+    128 & 41.722 & 26.961 & 85.200 & 50.923 \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
 \end{answer}
 
 \subq{b} Compile the entire Transformer in the end-to-end benchmark. How does forward-pass performance change? Forward+backward+optimizer?
 \deliverable{A table comparing vanilla vs.\ compiled Transformer.}
 \begin{answer}
+  \begin{table}[H]
+    \center
+    \caption{Benchmark results across model sizes (compiled).}
+    \label{tab:compiled-model-benchmark-results}
+    \begin{tabular}{llll}
+    \toprule
+    Size & forward & forward-back & forward-back-optimizer \\
+    \midrule
+    small & 0.0046 ± 0.0000 & 0.0137 ± 0.0000 & 0.0213 ± 0.0006 \\
+    med & 0.0116 ± 0.0000 & 0.0363 ± 0.0000 & 0.0530 ± 0.0001 \\
+    large & 0.0294 ± 0.0000 & 0.0860 ± 0.0001 & 0.1154 ± 0.0002 \\
+    xl & 0.0889 ± 0.0000 & 0.2515 ± 0.0005 & 0.3310 ± 0.0010 \\
+    10b & 0.2314 ± 0.0001 & 0.7359 ± 0.0009 & OOM \\
+    \bottomrule
+    \end{tabular}
+    \end{table}    
+
+    \begin{center}
+      \small
+      \begin{tabular}{lrrr}
+      \toprule
+      Size & Forward speedup & Forward-back speedup & Forward-back-opt speedup \\
+      \midrule
+      small & $3.59\times$ & $3.56\times$ & $2.63\times$ \\
+      med   & $4.07\times$ & $3.85\times$ & $2.95\times$ \\
+      large & $3.62\times$ & $3.68\times$ & $2.99\times$ \\
+      xl    & $3.30\times$ & $3.43\times$ & $2.86\times$ \\
+      10b   & $4.08\times$ & $3.82\times$ & OOM \\
+      \bottomrule
+      \end{tabular}
+    \end{center}
 \end{answer}
 
 

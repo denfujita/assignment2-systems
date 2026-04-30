@@ -99,7 +99,7 @@ def build_image(*, include_tests: bool = False) -> modal.Image:
 image = build_image()
 
 @app.function(image=image, gpu="B200", volumes={"/profiles": vol})
-def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mode: str, mixed_precision: bool, memory_measurement: bool):
+def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mode: str, mixed_precision: bool, memory_measurement: bool, use_compile: bool):
     """
     Initialize a BasicsTransformerLM, create random data, and benchmark:
     - forward
@@ -118,7 +118,8 @@ def benchmarking_script(num_warmups: int, num_steps: int, hyperparams: dict, mod
                                 hyperparams["d_ff"],
                                 hyperparams["rope_theta"])
     model = model.to(device)
-
+    if use_compile:
+        model = torch.compile(model)
     # generate random batch of data
     data = torch.randint(0, hyperparams["vocab_size"], (BATCH_SIZE, hyperparams["context_length"]), device=device)
     targets = torch.randint(0, hyperparams["vocab_size"], (BATCH_SIZE, hyperparams["context_length"]), device=device)
@@ -237,7 +238,7 @@ def generate_latex_table(setup, result) -> None:
         label="tab:model-benchmark-results",
     )
 
-    Path("benchmarking_mixed_precision.tex").write_text(latex)
+    Path("benchmark_torch_compile.tex").write_text(latex)
 
 @app.function(
     image=image,
@@ -293,6 +294,7 @@ if __name__ == "__main__":
             args.mode,
             False,
             False,
+            True,
         )
 
         print(f"{args.mode}: {mean:.4f} ± {std:.4f}")
@@ -300,25 +302,25 @@ if __name__ == "__main__":
 @app.local_entrypoint()
 def modal_main() -> None:
     # used in nsys question
-    report_path = profile_on_modal.remote("forward-back")
-    print(report_path)
+    # report_path = profile_on_modal.remote("forward-back")
+    # print(report_path)
 
-    # used in benchmarking question
+    # # used in benchmarking question
 
     eval_params = []
     setup = []
     
-    # for model_type, hyperparam in [("small", small_hyperparam), ("med", medium_hyperparam), ("large", large_hyperparam), ("xl", xl_hyperparam), ("10b", ten_b_hyperparam)]:
-    #     for mode in ["forward", "forward-back"]:
-    #         eval_params.append((5, 10, hyperparam, mode, True, True))
-    #         setup.append((model_type, mode))
+    for model_type, hyperparam in [("small", small_hyperparam), ("med", medium_hyperparam), ("large", large_hyperparam), ("xl", xl_hyperparam), ("10b", ten_b_hyperparam)]:
+        for mode in ["forward", "forward-back", "forward-back-optimizer"]:
+            eval_params.append((5, 10, hyperparam, mode, False, False, True))
+            setup.append((model_type, mode))
 
-    # memory profile xl
+    # # memory profile xl
     # for model_type, hyperparam in [("xl", xl_hyperparam)]:
-    #     for mode in ["forward", "forward-back-optimizer"]:
+    #     for mode in ["forward", "forward-back", "forward-back-optimizer"]:
     #         eval_params.append((5, 10, hyperparam, mode, True, True))
     #         setup.append((model_type, mode))
 
-    # result = list(benchmarking_script.starmap(eval_params, return_exceptions=True))
-    # latex = generate_latex_table(setup, result)
-    # return latex
+    result = list(benchmarking_script.starmap(eval_params, return_exceptions=True))
+    latex = generate_latex_table(setup, result)
+    return latex

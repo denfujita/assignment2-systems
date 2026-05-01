@@ -25,7 +25,8 @@ image = build_image(include_tests=True)
 
 @app.function(image=image, gpu="B200")
 def modal_main():
-    cmd = ["python", "-m", "pytest", "tests/test_attention.py", "-k", "test_flash_forward_pass_triton"]
+    # cmd = ["python", "-m", "pytest", "tests/test_attention.py", "-k", "test_flash_forward_pass_triton"]
+    cmd = ["uv", "run", "pytest", "-k", "test_flash_backward"]
     subprocess.run(cmd, cwd="/root", check=True)
 
 @app.local_entrypoint()

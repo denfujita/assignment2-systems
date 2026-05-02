@@ -56,9 +56,6 @@
 \begin{document}
 \maketitle
 
-\tableofcontents
-\vspace{1em}
-
 % =========================================================
 \section{Profiling and Benchmarking}
 % =========================================================
@@ -756,6 +753,25 @@ Implement the FA-2 backward using PyTorch + \texttt{torch.compile}, taking $Q, K
 Benchmark single-node all-reduce with tensor sizes $\{1, 10, 100, 1000\}$ MB (float32) and $\{2, 4, 6\}$ GPUs/processes.
 \deliverable{Plot(s) / table(s) plus 2--3 sentences of commentary.}
 \begin{answer}
+  \begin{table}[H]
+    \centering
+    \begin{tabular}{lrrr}
+    \toprule
+    Tensor size & 2 GPUs & 4 GPUs & 6 GPUs \\
+    \midrule
+    1MB   & 0.031 & 0.496 & 0.038 \\
+    10MB  & 0.059 & 0.288 & 0.172 \\
+    100MB & 0.224 & 0.290 & 0.298 \\
+    1GB   & 1.776 & 2.356 & 2.621 \\
+    \bottomrule
+    \end{tabular}
+    \caption{Single-node NCCL all-reduce mean latency in milliseconds across different tensor sizes and GPU counts. Each entry reports the average latency over 10 measured all-reduce operations after 5 warmup iterations.}
+    \label{tab:ddp_allreduce_latency}
+    \end{table}
+  When we add more GPUs, we actually see the time go up slightly due to latency between the GPUs (synchronization, etc). 
+  Also, I observe that the 10MB run time is somehow faster than the 1MB for the 4GPU case, I think this could be variance in the 
+  training, but I decided to keep it because I think it's an interesting result. Also interestingly, observe that 
+  latency grows slower than data size.
 \end{answer}
 
 

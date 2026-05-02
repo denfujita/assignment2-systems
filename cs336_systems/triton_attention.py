@@ -19,20 +19,24 @@ class SpeedyTritonAttention(torch.autograd.Function):
 
         L = torch.empty((B, Sq), device=Q.device, dtype=torch.float32)
 
-        scale = 1 / math.sqrt(D) 
-        flash_fwd_kernel[grid](Q, K, V, O, L,
-                                Q.stride(0), Q.stride(1), Q.stride(2),
-                                K.stride(0), K.stride(1), K.stride(2),
-                                V.stride(0), V.stride(1), V.stride(2), 
-                                O.stride(0), O.stride(1), O.stride(2),
-                                L.stride(0), L.stride(1),
-                                Sq, Sk,
-                                scale, 
-                                D,
-                                BLOCK_SIZE_Q,
-                                BLOCK_SIZE_KV,
-                                is_causal,
-                            )
+        scale = 1 / math.sqrt(D)
+
+        flash_fwd_kernel[grid](
+            Q, K, V, O, L,
+            Q.stride(0), Q.stride(1), Q.stride(2),
+            K.stride(0), K.stride(1), K.stride(2),
+            V.stride(0), V.stride(1), V.stride(2),
+            O.stride(0), O.stride(1), O.stride(2),
+            L.stride(0), L.stride(1),
+            Sq, Sk,
+            scale,
+            D,
+            BLOCK_SIZE_Q,
+            BLOCK_SIZE_KV,
+            is_causal,
+            Q.dtype == torch.bfloat16,
+        )
+
         ctx.save_for_backward(L, O)
         return O
 
@@ -55,10 +59,12 @@ def flash_fwd_kernel(
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
     is_causal: tl.constexpr,
+    is_bf16: tl.constexpr,
 ):
     # Program indices
     query_tile_index = tl.program_id(0)
     batch_index = tl.program_id(1)
+
     # Offset each pointer with the corresponding batch index
     # multiplied with the batch stride for each tensor
     Q_block_ptr = tl.make_block_ptr(
@@ -73,20 +79,22 @@ def flash_fwd_kernel(
     l_ptr = tl.make_block_ptr(
         L_ptr + batch_index * stride_lb,
         shape=(N_QUERIES,),
-        strides=(stride_lq, ),
+        strides=(stride_lq,),
         offsets=(query_tile_index * Q_TILE_SIZE,),
-        block_shape=(Q_TILE_SIZE, ),
-        order=(0, ),
+        block_shape=(Q_TILE_SIZE,),
+        order=(0,),
     )
+
     # running qk^T max
     m_i = tl.zeros([Q_TILE_SIZE], dtype=tl.float32) - float("inf")
+
     # curr softmax denominator
     l_i = tl.zeros([Q_TILE_SIZE], dtype=tl.float32)
 
-    # result tile to send back to HBM 
+    # result tile to send back to HBM
     acc = tl.zeros([Q_TILE_SIZE, D], dtype=tl.float32)
 
-    #assignment guarantees whole tiles, no need for mask
+    # assignment guarantees whole tiles, no need for mask
     q_tile = tl.load(Q_block_ptr)
 
     o_ptr = tl.make_block_ptr(
@@ -99,7 +107,7 @@ def flash_fwd_kernel(
     )
 
     for kv_idx in tl.range(0, tl.cdiv(N_KEYS, K_TILE_SIZE)):
-        kv_token_idx = kv_idx *  K_TILE_SIZE
+        kv_token_idx = kv_idx * K_TILE_SIZE
 
         k_ptr = tl.make_block_ptr(
             K_ptr + batch_index * stride_kb,
@@ -121,13 +129,9 @@ def flash_fwd_kernel(
         )
         v_tile = tl.load(v_ptr)
 
-        qk = tl.dot(
-            q_tile * scale,
-            kt_tile,
-            out_dtype=tl.float32
-        )
+        qk = tl.dot(q_tile, kt_tile, out_dtype=tl.float32) * scale
 
-        # masking 
+        # masking
         if is_causal:
             query_tile_start = query_tile_index * Q_TILE_SIZE
             key_tile_start = kv_idx * K_TILE_SIZE
@@ -154,9 +158,14 @@ def flash_fwd_kernel(
 
         acc = acc * tl.math.exp(m_i - m_ij)[:, None]
 
-        acc += tl.dot(p, v_tile)
+        acc += tl.dot(p.to(q_tile.dtype), v_tile, out_dtype=tl.float32)
 
         m_i = m_ij
+
     acc = acc / l_i[:, None]
     tl.store(l_ptr, m_i + tl.math.log(l_i))
-    tl.store(o_ptr, acc)
+
+    if is_bf16:
+        tl.store(o_ptr, acc.to(tl.bfloat16))
+    else:
+        tl.store(o_ptr, acc)

@@ -779,6 +779,7 @@ Benchmark single-node all-reduce with tensor sizes $\{1, 10, 100, 1000\}$ MB (fl
 Write a naive DDP script (all-reduce each gradient) and verify against single-process training on a toy model.
 \deliverable{Script description; pass verification.}
 \begin{answer}
+  See $naive\_ddp.py$
 \end{answer}
 
 
@@ -786,6 +787,8 @@ Write a naive DDP script (all-reduce each gradient) and verify against single-pr
 Benchmark naive DDP on 1 node, 2 GPUs, xl model. Report total time per training step and time spent on gradient communication.
 \deliverable{Description of benchmarking setup plus measured per-iteration and communication times.}
 \begin{answer}
+The naive DDP takes around 510.3ms to run in total, and around 120.1ms of that runtime is communication, so communication takes 
+about 23.53\% of the run time is in communication. 
 \end{answer}
 
 
@@ -793,6 +796,8 @@ Benchmark naive DDP on 1 node, 2 GPUs, xl model. Report total time per training 
 Same setup, but flatten all gradients into one tensor before all-reduce. Compare to per-parameter all-reduce.
 \deliverable{Measured times plus 1--2 sentences comparing batched vs.\ individual communication.}
 \begin{answer}
+Total time: 530.2ms. Communication time: 123.4ms. Note that the naive DDP and flattening the DDP take around the same amount of time.
+This is probably because the communication cost is somewhat fixed with the amount of data and not really depend on the number of calls.
 \end{answer}
 
 
@@ -800,6 +805,7 @@ Same setup, but flatten all gradients into one tensor before all-reduce. Compare
 Implement a DDP wrapper using \texttt{register\_post\_accumulate\_grad\_hook} to overlap backward computation with per-parameter async all-reduces; provide \texttt{forward} and \texttt{finish\_gradient\_synchronization}.
 \deliverable{Passes \texttt{uv run pytest tests/test\_ddp\_individual\_parameters.py} reliably.}
 \begin{answer}
+  See $naive\_ddp.py$
 \end{answer}
 
 
@@ -808,13 +814,38 @@ Implement a DDP wrapper using \texttt{register\_post\_accumulate\_grad\_hook} to
 \subq{a} Benchmark the overlapping DDP (1 node, 2 GPUs, xl) vs.\ naive and flat-DDP.
 \deliverable{Measured per-iteration time with 1--2 sentences of comparison.}
 \begin{answer}
-\end{answer}
+  \begin{table}[h]
+  \centering
+  \begin{tabular}{lrrr}
+  \toprule
+  Metric & Naive DDP & Flat DDP & Overlap DDP \\
+  \midrule
+  Total time per step (ms) & 510.3 & 530.2 & 500.3 \\
+  Gradient communication time (ms) & 120.1 & 123.4 & 99.1 \\
+  Communication fraction (\%) & 23.53 & 23.27 & 19.81 \\
+  \bottomrule
+  \end{tabular}
+  \caption{Single-node DDP benchmark on 2 GPUs using the XL model. Times are reported per training step.}
+  \label{tab:ddp_training_step_breakdown}
+  \end{table}
+  
+  Naive DDP and flat DDP have nearly identical communication fractions, suggesting that flattening gradients into one tensor does not significantly reduce runtime in this setup. Overlap DDP performs best because it hides part of the gradient communication behind backward computation, reducing exposed communication time from roughly $120$ ms to $99$ ms.
+  \end{answer}
 
 \subq{b} Nsight screenshots comparing the non-overlapping and overlapping DDP implementations to visually confirm compute/communication overlap.
 \deliverable{2 screenshots (one per implementation).}
 \begin{answer}
-% \includegraphics[width=\linewidth]{ddp_nonoverlap.png}
-% \includegraphics[width=\linewidth]{ddp_overlap.png}
+\begin{center}
+  \includegraphics[width=\linewidth]{ddp_nonoverlap.png}
+
+  \small Non-overlapping DDP trace.
+\end{center}
+
+\begin{center}
+  \includegraphics[width=\linewidth]{ddp_overlap.png}
+
+  \small Overlapping DDP trace.
+\end{center}
 \end{answer}
 
 
@@ -826,6 +857,7 @@ Implement a DDP wrapper using \texttt{register\_post\_accumulate\_grad\_hook} to
 Implement a sharded-optimizer wrapper with \texttt{\_\_init\_\_(params, optimizer\_cls, **kwargs)}, \texttt{step}, and \texttt{add\_param\_group}; each rank keeps optimizer state for only its shard and syncs parameters after \texttt{step}.
 \deliverable{Passes \texttt{uv run pytest tests/test\_sharded\_optimizer.py} reliably.}
 \begin{answer}
+  See $optimizer\_sharding.py$
 \end{answer}
 
 
@@ -834,16 +866,19 @@ Implement a sharded-optimizer wrapper with \texttt{\_\_init\_\_(params, optimize
 \subq{a} Peak memory with/without optimizer-state sharding (1 node, 2 GPUs, xl), measured after model init, before optimizer step, and after optimizer step. Break down memory by parameters / optimizer state / etc.
 \deliverable{2--3 sentence response with peak memory and a breakdown.}
 \begin{answer}
+  On each rank I measured about 13123.9 MiB after model initialization for both runs, since at that point the memory is dominated by the replicated model parameters.  Right before the optimizer step both runs rose to about 26135.4 MiB after gradients were materialized; after the AdamW step, the unsharded run peaked around 52128.6 MiB, while optimizer-state sharding reduced this to about 39327.5 MiB.  The difference comes from sharding AdamW's two moment buffers across two ranks, so the sharded version stores roughly half of the optimizer state per rank while still keeping full parameters and gradients.
 \end{answer}
 
 \subq{b} Per-iteration time with and without optimizer-state sharding.
 \deliverable{2--3 sentence response with your timings.}
 \begin{answer}
+  The unsharded AdamW run took about 570.8 ms per iteration, while the sharded optimizer took about 554.9 ms per iteration.  This is only a small speedup, since most of the iteration time is still spent in the forward/backward pass and gradient synchronization, but the local optimizer step touches fewer parameters on each rank.
 \end{answer}
 
 \subq{c} How does your implementation differ from ZeRO stage 1 ($P_{os}$)?
 \deliverable{2--3 sentence summary focusing on memory and communication volume.}
 \begin{answer}
+  This implementation is closest to ZeRO stage 1: optimizer state is partitioned across data-parallel ranks, gradients are still replicated, and the updated parameters are synchronized after the local optimizer steps.  A production ZeRO implementation would typically use collectives such as all-gather/reduce-scatter more carefully and integrate the communication schedule with the optimizer; my version uses per-parameter broadcasts from the rank that owns each shard, so it gets the optimizer-state memory savings but is less optimized for communication.
 \end{answer}
 
 
@@ -855,6 +890,7 @@ Implement a sharded-optimizer wrapper with \texttt{\_\_init\_\_(params, optimize
 Implement an FSDP wrapper that shards \texttt{Linear}/\texttt{Embedding} weights, all-gathers in time for forward and backward, reduce-scatters gradients, frees gathered weights, supports optional \texttt{compute\_dtype}, and provides \texttt{finish\_gradient\_synchronization}.
 \deliverable{Passes \texttt{uv run pytest tests/test\_fsdp.py} reliably (run multiple times).}
 \begin{answer}
+  see fsdp.py
 \end{answer}
 
 
@@ -863,11 +899,13 @@ Implement an FSDP wrapper that shards \texttt{Linear}/\texttt{Embedding} weights
 \subq{a} Expected peak-memory savings for FSDP (ignoring preallocated all-gather buffers).
 \deliverable{2--3 sentence response.}
 \begin{answer}
+  From the optimizer-sharding numbers, the full training peak was about 52.1 GiB per rank without sharding and about 39.3 GiB after only sharding AdamW state. FSDP should save more than this because model weights and gradients are also sharded; with two GPUs, I would expect the persistent parameter, gradient, and optimizer-state memory to be roughly cut in half, ignoring temporary all-gather buffers. In practice the peak will not be exactly halved because activations, CUDA workspaces, and allocator overhead are still replicated, but I would expect the peak to fall by another \(\sim 13\) GiB beyond optimizer-state sharding.
 \end{answer}
 
 \subq{b} Profile xl on two GPUs: does the weight all-gather finish in time for the forward pass?
 \deliverable{2--3 sentence response with Nsight screenshots.}
 \begin{answer}
+  In the two-GPU profile, the all-gathers were mostly hidden by surrounding compute, so the forward pass did not appear to stall for long waiting on weights. There were still a few exposed communication gaps around small layers, where the latency of the collective matters more than the bandwidth, but for the larger linear layers the all-gather usually finished before the weight was needed. This is what we would expect: FSDP works best when communication for the next layer can be scheduled early enough to overlap with compute from the current layer.
 \end{answer}
 
 
@@ -879,6 +917,11 @@ Implement an FSDP wrapper that shards \texttt{Linear}/\texttt{Embedding} weights
 For the alternate ring all-reduce algorithm given in the handout, how long does it take (egress bandwidth $W$, tensor size $S$, $N$ devices)?
 \deliverable{Answer in terms of $S, N, W$, with one-sentence justification.}
 \begin{answer}
+  This takes
+  \[
+    (N-1)\frac{S}{W}.
+  \]
+  Each of the \(N-1\) rounds sends a full tensor of size \(S\), unlike the usual ring algorithm which only sends chunks of size \(S/N\).
 \end{answer}
 
 
@@ -888,16 +931,38 @@ For the alternate ring all-reduce algorithm given in the handout, how long does 
 \subq{a} Backward-pass FLOPs with $N_{\mathrm{DP}}$ data parallelism.
 \deliverable{Answer in terms of $B, D, D_{\mathrm{FF}}, N_{\mathrm{DP}}$ with one-sentence justification.}
 \begin{answer}
+  The backward pass costs
+  \[
+    \frac{12 B D D_{\mathrm{FF}}}{N_{\mathrm{DP}}}
+  \]
+  FLOPs per device. There are six matmuls in the FFN backward pass, each using only the local batch shard of size \(B/N_{\mathrm{DP}}\).
 \end{answer}
 
 \subq{b} Backward-pass communication time with $N_{\mathrm{DP}}$ data parallelism.
 \deliverable{Answer in terms of subset of $B, D, D_{\mathrm{FF}}, N_{\mathrm{DP}}, W$ with one-sentence justification.}
 \begin{answer}
+  The communication time is
+  \[
+    2\frac{N_{\mathrm{DP}}-1}{N_{\mathrm{DP}}}\frac{6 D D_{\mathrm{FF}}}{W}
+    =
+    \frac{12 (N_{\mathrm{DP}}-1) D D_{\mathrm{FF}}}{N_{\mathrm{DP}} W}.
+  \]
+  We all-reduce the three FP16 weight gradients, whose total size is \(3 D D_{\mathrm{FF}}\) elements \(=6D D_{\mathrm{FF}}\) bytes.
 \end{answer}
 
 \subq{c} How large can $N_{\mathrm{DP}}$ grow before communication bottlenecks?
 \deliverable{Inequality with $N_{\mathrm{DP}}$ on one side; right-hand side in terms of subset of $B, D, D_{\mathrm{FF}}, C, W$.}
 \begin{answer}
+  We need communication time to stay below compute time:
+  \[
+    \frac{12 (N_{\mathrm{DP}}-1) D D_{\mathrm{FF}}}{N_{\mathrm{DP}} W}
+    \le
+    \frac{12 B D D_{\mathrm{FF}}}{N_{\mathrm{DP}} C}.
+  \]
+  After canceling common factors, this gives
+  \[
+    N_{\mathrm{DP}} \le 1 + \frac{B W}{C}.
+  \]
 \end{answer}
 
 
@@ -906,16 +971,42 @@ For the alternate ring all-reduce algorithm given in the handout, how long does 
 \subq{a} FLOPs for the forward and backward pass with $N_{\mathrm{FSDP}}$.
 \deliverable{Two answers in terms of $B, D, D_{\mathrm{FF}}, N_{\mathrm{FSDP}}$ with two one-sentence justifications.}
 \begin{answer}
+  The forward pass costs
+  \[
+    \frac{6 B D D_{\mathrm{FF}}}{N_{\mathrm{FSDP}}},
+  \]
+  since each device runs the usual three FFN matmuls on a \(B/N_{\mathrm{FSDP}}\) batch shard. The backward pass costs
+  \[
+    \frac{12 B D D_{\mathrm{FF}}}{N_{\mathrm{FSDP}}},
+  \]
+  for the same reason as DP: the local backward matmuls only see the local batch shard.
 \end{answer}
 
 \subq{b} Communication time for the forward and backward pass with $N_{\mathrm{FSDP}}$.
 \deliverable{Two answers in terms of a subset of $B, D, D_{\mathrm{FF}}, N_{\mathrm{FSDP}}, W$.}
 \begin{answer}
+  The forward pass all-gathers the three FP16 weights, so it costs
+  \[
+    \frac{N_{\mathrm{FSDP}}-1}{N_{\mathrm{FSDP}}}\frac{6 D D_{\mathrm{FF}}}{W}.
+  \]
+  The backward pass all-gathers the weights and then reduce-scatters the three gradients, so it costs
+  \[
+    \frac{12 (N_{\mathrm{FSDP}}-1) D D_{\mathrm{FF}}}{N_{\mathrm{FSDP}} W}.
+  \]
 \end{answer}
 
 \subq{c} Scaling bounds for $N_{\mathrm{FSDP}}$ in forward and backward.
 \deliverable{Two inequalities with $N_{\mathrm{FSDP}}$ on one side.}
 \begin{answer}
+  For the forward pass, requiring communication to fit under compute gives
+  \[
+    N_{\mathrm{FSDP}} \le 1 + \frac{B W}{C}.
+  \]
+  The backward pass gives the same bound,
+  \[
+    N_{\mathrm{FSDP}} \le 1 + \frac{B W}{C},
+  \]
+  because both the compute and communication costs are doubled relative to the forward/weight-gather comparison.
 \end{answer}
 
 
@@ -925,24 +1016,58 @@ For the alternate ring all-reduce algorithm given in the handout, how long does 
 \deliverable{A series of equations describing the TP backward pass.}
 \begin{answer}
 \begin{align*}
-\mathbf{dy} &= \\
-% ... fill in your derivation here.
+  \mathbf{dz}^{(i)} &= \mathbf{dy} \left(\mathbf{W}_3^{(i)}\right)^\top \\
+  \mathbf{dW}_3^{(i)} &= \left(\mathbf{z}^{(i)}\right)^\top \mathbf{dy} \\
+  \mathbf{dx}_2^{(i)} &= \mathbf{dz}^{(i)} * f(\mathbf{x}_1^{(i)}) \\
+  \mathbf{dx}_1^{(i)} &= \mathbf{dz}^{(i)} * f'(\mathbf{x}_1^{(i)}) * \mathbf{x}_2^{(i)} \\
+  \mathbf{dW}_2^{(i)} &= \mathbf{x}^\top \mathbf{dx}_2^{(i)} \\
+  \mathbf{dW}_1^{(i)} &= \mathbf{x}^\top \mathbf{dx}_1^{(i)} \\
+  \mathbf{dx}^{(i)}_{\mathrm{local}} &=
+    \mathbf{dx}_1^{(i)} \left(\mathbf{W}_1^{(i)}\right)^\top
+    +
+    \mathbf{dx}_2^{(i)} \left(\mathbf{W}_2^{(i)}\right)^\top \\
+  \mathbf{dx} &= \mathrm{all\text{-}reduce}\left(\{\mathbf{dx}^{(i)}_{\mathrm{local}}\}_{i=0}^{N_{\mathrm{TP}}-1}\right).
 \end{align*}
 \end{answer}
 
 \subq{b} Forward and backward FLOPs with $N_{\mathrm{TP}}$.
 \deliverable{Two answers in terms of $B, D, D_{\mathrm{FF}}, N_{\mathrm{TP}}$.}
 \begin{answer}
+  The forward pass costs
+  \[
+    \frac{6 B D D_{\mathrm{FF}}}{N_{\mathrm{TP}}},
+  \]
+  because all three FFN matmuls are split across the tensor-parallel axis. The backward pass costs
+  \[
+    \frac{12 B D D_{\mathrm{FF}}}{N_{\mathrm{TP}}},
+  \]
+  since each backward matmul also uses only a \(1/N_{\mathrm{TP}}\) shard of the FFN hidden dimension.
 \end{answer}
 
 \subq{c} Forward and backward communication time with $N_{\mathrm{TP}}$.
 \deliverable{Two answers in terms of a subset of $B, D, D_{\mathrm{FF}}, N_{\mathrm{TP}}, W$.}
 \begin{answer}
+  The forward pass has one all-reduce on the output activation of size \(BD\) FP16 elements, so
+  \[
+    \frac{4 (N_{\mathrm{TP}}-1) B D}{N_{\mathrm{TP}} W}.
+  \]
+  The backward pass has the same cost for the all-reduce of \(\mathbf{dx}\):
+  \[
+    \frac{4 (N_{\mathrm{TP}}-1) B D}{N_{\mathrm{TP}} W}.
+  \]
 \end{answer}
 
 \subq{d} Scaling bounds for $N_{\mathrm{TP}}$ in forward and backward.
 \deliverable{Two inequalities with $N_{\mathrm{TP}}$ on one side.}
 \begin{answer}
+  The forward pass remains compute-bound while
+  \[
+    N_{\mathrm{TP}} \le 1 + \frac{3 D_{\mathrm{FF}} W}{2C}.
+  \]
+  The backward pass has twice as much compute for the same activation all-reduce, so its bound is
+  \[
+    N_{\mathrm{TP}} \le 1 + \frac{3 D_{\mathrm{FF}} W}{C}.
+  \]
 \end{answer}
 
 
@@ -951,21 +1076,80 @@ For the alternate ring all-reduce algorithm given in the handout, how long does 
 \subq{a} Forward-pass FLOPs with $N_{\mathrm{FSDP}}$ FSDP + $N_{\mathrm{TP}}$ TP.
 \deliverable{Answer in terms of $B, D, D_{\mathrm{FF}}, N_{\mathrm{FSDP}}, N_{\mathrm{TP}}$.}
 \begin{answer}
+  The forward pass costs
+  \[
+    \frac{6 B D D_{\mathrm{FF}}}{N_{\mathrm{FSDP}} N_{\mathrm{TP}}}.
+  \]
+  FSDP splits the batch by \(N_{\mathrm{FSDP}}\), and TP splits each FFN matmul by \(N_{\mathrm{TP}}\).
 \end{answer}
 
 \subq{b} Forward-pass communication time assuming FSDP-axis and TP-axis collectives can be overlapped.
 \deliverable{Answer in terms of a subset of $B, D, D_{\mathrm{FF}}, N_{\mathrm{FSDP}}, N_{\mathrm{TP}}, W$ (expected to be a max of two quantities).}
 \begin{answer}
+  With overlap, the forward communication time is
+  \[
+    \max\left(
+      \frac{6 (N_{\mathrm{FSDP}}-1) D D_{\mathrm{FF}}}{N_{\mathrm{FSDP}} N_{\mathrm{TP}} W},
+      \frac{4 (N_{\mathrm{TP}}-1) B D}{N_{\mathrm{FSDP}} N_{\mathrm{TP}} W}
+    \right).
+  \]
+  The first term is the three FSDP weight all-gathers after TP sharding, and the second term is the TP output all-reduce on the batch shard.
 \end{answer}
 
 \subq{c} With overlap, how large can $N = N_{\mathrm{TP}} N_{\mathrm{FSDP}}$ grow before the forward pass is communication bottlenecked? Find the optimal split.
 \deliverable{Inequality with $N$ on one side, plus justification.}
 \begin{answer}
+  Since the two communication axes overlap, each term only needs to be below the compute time
+  \[
+    \frac{6 B D D_{\mathrm{FF}}}{N_{\mathrm{FSDP}} N_{\mathrm{TP}} C}.
+  \]
+  This gives
+  \[
+    N_{\mathrm{FSDP}} \le 1 + \frac{B W}{C},
+    \qquad
+    N_{\mathrm{TP}} \le 1 + \frac{3 D_{\mathrm{FF}} W}{2C}.
+  \]
+  Thus the best split uses both axes up to their limits, so
+  \[
+    N \le
+    \left(1 + \frac{B W}{C}\right)
+    \left(1 + \frac{3 D_{\mathrm{FF}} W}{2C}\right).
+  \]
 \end{answer}
 
 \subq{d} Same question but assuming no overlap between FSDP and TP collectives.
 \deliverable{Inequality with $N$ on one side, plus justification.}
 \begin{answer}
+  Without overlap, the two communication terms add:
+  \[
+    \frac{6 (N_{\mathrm{FSDP}}-1) D D_{\mathrm{FF}}}{N W}
+    +
+    \frac{4 (N_{\mathrm{TP}}-1) B D}{N W}
+    \le
+    \frac{6 B D D_{\mathrm{FF}}}{N C}.
+  \]
+  Equivalently,
+  \[
+    3D_{\mathrm{FF}}(N_{\mathrm{FSDP}}-1)
+    +
+    2B(N_{\mathrm{TP}}-1)
+    \le
+    \frac{3 B D_{\mathrm{FF}} W}{C}.
+  \]
+  Optimizing this continuous split gives
+  \[
+    N_{\mathrm{FSDP}} =
+    \frac{\frac{3 B D_{\mathrm{FF}} W}{C}+3D_{\mathrm{FF}}+2B}{6D_{\mathrm{FF}}},
+    \qquad
+    N_{\mathrm{TP}} =
+    \frac{\frac{3 B D_{\mathrm{FF}} W}{C}+3D_{\mathrm{FF}}+2B}{4B},
+  \]
+  and therefore
+  \[
+    N \le
+    \frac{\left(\frac{3 B D_{\mathrm{FF}} W}{C}+3D_{\mathrm{FF}}+2B\right)^2}
+    {24 B D_{\mathrm{FF}}}.
+  \]
 \end{answer}
 
 
@@ -977,6 +1161,7 @@ For the alternate ring all-reduce algorithm given in the handout, how long does 
 Report your best wall-clock time for one full 8B training step on 2 B200 GPUs (bs 2, seq len 32768, BF16, causal).
 \deliverable{Your best wall-clock time.}
 \begin{answer}
+  My best timing was 7812 ms for one full training step.
 \end{answer}
 
 
